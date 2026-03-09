@@ -1,0 +1,32 @@
+{
+  "name": "@nyaagrab/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "tauri:dev": "node ../../scripts/with-rust-bin.mjs tauri dev",
+    "tauri:build": "node ../../scripts/with-rust-bin.mjs tauri build"
+  },
+  "dependencies": {
+    "@nyaagrab/contracts": "workspace:*",
+    "@nyaagrab/core": "workspace:*",
+    "@tauri-apps/api": "^2.10.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@types/react": "^19.0.12",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.4.1",
+    "jsdom": "^26.0.0",
+    "vite": "^6.2.0"
+  }
+}

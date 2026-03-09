@@ -1,0 +1,20 @@
+[package]
+name = "nyaagrab-desktop"
+version = "0.1.0"
+description = "Desktop shell for NyaaGrab"
+authors = ["nyaagrab contributors"]
+edition = "2021"
+
+[lib]
+name = "nyaagrab_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+reqwest = { version = "0.12.12", features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.10.3", features = ["config-json5"] }
+rfd = "0.15.2"

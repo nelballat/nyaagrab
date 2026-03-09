@@ -1,0 +1,19 @@
+{
+  "name": "nyaagrab",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.6.3",
+  "scripts": {
+    "dev": "pnpm --filter @nyaagrab/desktop dev",
+    "desktop:dev": "pnpm --filter @nyaagrab/desktop tauri:dev",
+    "desktop:build": "pnpm --filter @nyaagrab/desktop tauri:build",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "check": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}
