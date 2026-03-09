@@ -21,7 +21,14 @@ It is meant for the simple but annoying use case of catching up on long-running 
 - `packages/core`: pure search / parsing / ranking / orchestration logic
 - `packages/test-fixtures`: reusable fixture generators for tests
 
-## Requirements
+## Repo status
+
+This repository currently represents the source code for the desktop app.
+
+- There is no packaged end-user release yet.
+- The commands below are for local development / testing from source.
+
+## Development requirements
 
 - Node.js 20+
 - `pnpm` 10+
@@ -29,13 +36,13 @@ It is meant for the simple but annoying use case of catching up on long-running 
 - Windows desktop builds: Visual Studio Build Tools 2022 with MSVC
 - Windows desktop runtime: WebView2
 
-## Install
+## Install dependencies from source
 
 ```bash
 pnpm install
 ```
 
-## Run
+## Run from source
 
 Frontend only:
 
@@ -49,7 +56,7 @@ Actual desktop app:
 pnpm desktop:dev
 ```
 
-## Build
+## Build from source
 
 Desktop build:
 
