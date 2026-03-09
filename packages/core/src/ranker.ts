@@ -19,7 +19,11 @@ export function scoreRelease(
   preferSmall: boolean,
   preferredGroups: string[],
   preferredResolution: string,
-  preferredCodec: string
+  preferredCodec: string,
+  options: {
+    episodeOverride?: number;
+    scorePenalty?: number;
+  } = {}
 ): ReleaseCandidate {
   const parsed = parseTitle(torrent.title);
   let score = 0;
@@ -50,8 +54,10 @@ export function scoreRelease(
     score += Math.min(torrent.seeders, 200);
   }
 
+  score -= options.scorePenalty ?? 0;
+
   return {
-    episode: parsed.episode ?? 0,
+    episode: options.episodeOverride ?? parsed.episode ?? 0,
     title: torrent.title,
     group: parsed.group,
     resolution: parsed.resolution,

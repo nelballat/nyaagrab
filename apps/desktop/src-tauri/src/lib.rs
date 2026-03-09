@@ -57,7 +57,7 @@ fn nyaa_client() -> Result<&'static Client, String> {
 }
 
 #[tauri::command]
-async fn fetch_nyaa_rss(query: String) -> TextResponse {
+async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> TextResponse {
     let client = match nyaa_client() {
         Ok(client) => client,
         Err(error) => {
@@ -76,8 +76,8 @@ async fn fetch_nyaa_rss(query: String) -> TextResponse {
             .query(&[
                 ("page", "rss"),
                 ("q", query.as_str()),
-                ("c", "1_2"),
-                ("f", "0"),
+                ("c", category.as_str()),
+                ("f", filter.as_str()),
                 ("p", "1"),
             ])
             .send()

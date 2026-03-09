@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { runSearch } from "./desktop-api";
 
 vi.mock("./desktop-api", () => ({
   runSearch: vi.fn().mockResolvedValue({
@@ -74,6 +75,30 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/Exported magnets to C:\/temp\/magnets.txt/)).toBeInTheDocument();
+    });
+  });
+
+  it("passes preferred groups and Nyaa search controls to the search request", async () => {
+    render(<App />);
+    fireEvent.change(screen.getByPlaceholderText("One Piece"), { target: { value: "Detective Conan" } });
+    fireEvent.change(screen.getByPlaceholderText("SubsPlease"), { target: { value: "SubsPlease, ASW" } });
+    fireEvent.change(screen.getByLabelText("Result shape"), { target: { value: "batchesOnly" } });
+    fireEvent.change(screen.getByLabelText("Filter"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Category"), { target: { value: "3_1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      expect(runSearch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          anime: "Detective Conan",
+          category: "3_1",
+          filter: "2",
+          resultShape: "batchesOnly",
+          preferredGroups: ["SubsPlease", "ASW"],
+          manualAltTitles: []
+        }),
+        expect.any(Function)
+      );
     });
   });
 });

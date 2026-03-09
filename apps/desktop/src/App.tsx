@@ -1,5 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { EpisodeResult, SearchRequest, SearchResult } from "@nyaagrab/contracts";
+import type {
+  EpisodeResult,
+  NyaaCategory,
+  NyaaFilter,
+  ResultShape,
+  SearchRequest,
+  SearchResult
+} from "@nyaagrab/contracts";
 import { SearchRequestSchema } from "@nyaagrab/contracts";
 import { exportMagnets, openMagnet, runSearch, copyText } from "./desktop-api";
 
@@ -7,6 +14,9 @@ const defaultRequest: SearchRequest = {
   anime: "",
   startEpisode: 1,
   endEpisode: 1,
+  category: "1_2",
+  filter: "0",
+  resultShape: "auto",
   preferSmall: false,
   preferredResolution: "1080p",
   preferredCodec: "Any",
@@ -16,6 +26,45 @@ const defaultRequest: SearchRequest = {
 };
 
 const STORAGE_KEY = "nyaagrab.desktop.searchForm";
+
+const RESULT_SHAPE_OPTIONS: Array<{ value: ResultShape; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "batchesOnly", label: "Batches only" },
+  { value: "episodesOnly", label: "Episodes only" }
+];
+
+const NYAA_FILTER_OPTIONS: Array<{ value: NyaaFilter; label: string }> = [
+  { value: "0", label: "No filter" },
+  { value: "1", label: "No remakes" },
+  { value: "2", label: "Trusted only" }
+];
+
+const NYAA_CATEGORY_OPTIONS: Array<{ value: NyaaCategory; label: string }> = [
+  { value: "0_0", label: "All categories" },
+  { value: "1_0", label: "Anime" },
+  { value: "1_1", label: "Anime - Anime Music Video" },
+  { value: "1_2", label: "Anime - English-translated" },
+  { value: "1_3", label: "Anime - Non-English-translated" },
+  { value: "1_4", label: "Anime - Raw" },
+  { value: "2_0", label: "Audio" },
+  { value: "2_1", label: "Audio - Lossless" },
+  { value: "2_2", label: "Audio - Lossy" },
+  { value: "3_0", label: "Literature" },
+  { value: "3_1", label: "Literature - English-translated" },
+  { value: "3_2", label: "Literature - Non-English-translated" },
+  { value: "3_3", label: "Literature - Raw" },
+  { value: "4_0", label: "Live Action" },
+  { value: "4_1", label: "Live Action - English-translated" },
+  { value: "4_2", label: "Live Action - Idol/Promotional Video" },
+  { value: "4_3", label: "Live Action - Non-English-translated" },
+  { value: "4_4", label: "Live Action - Raw" },
+  { value: "5_0", label: "Pictures" },
+  { value: "5_1", label: "Pictures - Graphics" },
+  { value: "5_2", label: "Pictures - Photos" },
+  { value: "6_0", label: "Software" },
+  { value: "6_1", label: "Software - Applications" },
+  { value: "6_2", label: "Software - Games" }
+];
 
 type StoredFormState = {
   request: SearchRequest;
@@ -53,7 +102,21 @@ function formatSize(bytes: number): string {
 }
 
 function bestMagnets(result: SearchResult | null): string[] {
-  return result?.episodes.filter((episode) => episode.best).map((episode) => episode.best!.magnet) ?? [];
+  if (!result) {
+    return [];
+  }
+
+  const magnets: string[] = [];
+  const seen = new Set<string>();
+  for (const episode of result.episodes) {
+    const magnet = episode.best?.magnet;
+    if (!magnet || seen.has(magnet)) {
+      continue;
+    }
+    seen.add(magnet);
+    magnets.push(magnet);
+  }
+  return magnets;
 }
 
 function cleanReleaseTitle(title: string): string {
@@ -70,11 +133,11 @@ function cleanReleaseTitle(title: string): string {
   return base;
 }
 
-const MIN_LEFT_PANE_WIDTH = 400;
-const MAX_LEFT_PANE_WIDTH = 560;
-const MIN_RIGHT_PANE_WIDTH = 820;
+const MIN_LEFT_PANE_WIDTH = 360;
+const MAX_LEFT_PANE_WIDTH = 540;
+const MIN_RIGHT_PANE_WIDTH = 720;
 const SPLIT_GUTTER_WIDTH = 8;
-const RESULTS_OUTER_PADDING = 28;
+const RESULTS_OUTER_PADDING = 20;
 
 function canUseResizableSplit(containerWidth: number): boolean {
   return containerWidth >= MIN_LEFT_PANE_WIDTH + MIN_RIGHT_PANE_WIDTH + SPLIT_GUTTER_WIDTH + RESULTS_OUTER_PADDING;
@@ -260,8 +323,9 @@ function EpisodeTable({
 /* ── Main app ── */
 export function App() {
   const shellRef = useRef<HTMLElement | null>(null);
-  const [request, setRequest] = useState<SearchRequest>(() => loadStoredFormState().request);
-  const [groupInput, setGroupInput] = useState(() => loadStoredFormState().groupInput);
+  const [storedFormState] = useState(() => loadStoredFormState());
+  const [request, setRequest] = useState<SearchRequest>(storedFormState.request);
+  const [groupInput, setGroupInput] = useState(storedFormState.groupInput);
   const [result, setResult] = useState<SearchResult | null>(null);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
@@ -328,7 +392,9 @@ export function App() {
 
   const mascotState = getMascotState(busy, result);
   const hasResultsSurface = result !== null || liveEpisodes.length > 0;
-  const shellClassName = hasResultsSurface ? "app-shell app-shell--results" : "app-shell app-shell--idle";
+  const shellClassName = hasResultsSurface
+    ? `app-shell app-shell--results${canResizeSplit ? "" : " app-shell--stacked"}`
+    : "app-shell app-shell--idle";
   const showStatus = !busy && status !== "Ready" && !status.startsWith("Completed:");
 
   useEffect(() => {
@@ -459,6 +525,41 @@ export function App() {
                 placeholder="One Piece"
               />
             </label>
+            <div className="row row--search-source">
+              <label>
+                Result shape
+                <select
+                  value={request.resultShape}
+                  onChange={(event) => setRequest((current) => ({ ...current, resultShape: event.target.value as ResultShape }))}
+                >
+                  {RESULT_SHAPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Filter
+                <select
+                  value={request.filter}
+                  onChange={(event) => setRequest((current) => ({ ...current, filter: event.target.value as NyaaFilter }))}
+                >
+                  {NYAA_FILTER_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Category
+                <select
+                  value={request.category}
+                  onChange={(event) => setRequest((current) => ({ ...current, category: event.target.value as NyaaCategory }))}
+                >
+                  {NYAA_CATEGORY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="row row--primary">
               <label>
                 Start
@@ -505,29 +606,29 @@ export function App() {
                 </select>
               </label>
             </div>
-            <div className="row row--secondary">
+            <div className="row row--secondary-fields">
               <label className="field field--wide field--stacked">
                 Preferred groups
                 <input value={groupInput} onChange={(event) => setGroupInput(event.target.value)} placeholder="SubsPlease" />
               </label>
-              <div className="toggle-group" aria-label="Search options">
-                <label className="checkbox checkbox--card">
-                  <input
-                    type="checkbox"
-                    checked={request.preferSmall}
-                    onChange={(event) => setRequest((current) => ({ ...current, preferSmall: event.target.checked }))}
-                  />
-                  Prefer smaller files
-                </label>
-                <label className="checkbox checkbox--card">
-                  <input
-                    type="checkbox"
-                    checked={!request.disableAutoResolve}
-                    onChange={(event) => setRequest((current) => ({ ...current, disableAutoResolve: !event.target.checked }))}
-                  />
-                  Use alternate titles
-                </label>
-              </div>
+            </div>
+            <div className="toggle-group" aria-label="Search options">
+              <label className="checkbox checkbox--card">
+                <input
+                  type="checkbox"
+                  checked={request.preferSmall}
+                  onChange={(event) => setRequest((current) => ({ ...current, preferSmall: event.target.checked }))}
+                />
+                Prefer smaller files
+              </label>
+              <label className="checkbox checkbox--card">
+                <input
+                  type="checkbox"
+                  checked={!request.disableAutoResolve}
+                  onChange={(event) => setRequest((current) => ({ ...current, disableAutoResolve: !event.target.checked }))}
+                />
+                Use alternate titles
+              </label>
             </div>
             <div className="row">
               <button type="submit" disabled={busy}>{busy ? "Searching..." : "Search"}</button>

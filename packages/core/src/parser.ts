@@ -4,8 +4,10 @@ const HASH_BRACKET_RE = /\[[0-9A-Fa-f]{6,}\]/g;
 const RESOLUTION_NUMS = new Set([1080, 1280, 1920]);
 const EP_PATTERNS = [
   /[-–—]\s*(\d{1,4})(?:v(\d+))?(?:\s|[(\[.]|$)/i,
-  /\bEP\s*(\d{1,4})(?:v(\d+))?(?:\s|[(\[.]|$)/i,
-  /\bS\d+E(\d{1,4})(?:v(\d+))?(?:\s|[(\[.]|$)/i
+  /\b(?:EP|Episode)\s*(\d{1,4})(?:v(\d+))?(?:\s|[(\[.]|$)/i,
+  /\bS\d+E(\d{1,4})(?:v(\d+))?(?:\s|[(\[.]|$)/i,
+  /(?:^|\D)#(\d{1,4})(?:v(\d+))?(?:\s|[(\[.]|$)/i,
+  /(?:^|\D)第?(\d{1,4})[話弾](?:\s|[(\[.]|$)/u
 ];
 const BATCH_RANGE_RE = /(\d{2,4})\s*[-–~]\s*(\d{2,4})/;
 const MOVIE_RE = /\bMovie\b/i;
@@ -14,6 +16,55 @@ const GROUP_RE = /^\[([^\]]+)\]/;
 const RES_RE = /(\d{3,4})p\b/i;
 const CODEC_RE = /\b(HEVC|H\.?265|x265|AVC|H\.?264|x264|VP9|AV1)\b/i;
 const REPACK_RE = /\bREPACK\b/i;
+const FILE_EXTENSION_RE = /\.[a-z0-9]{2,4}$/i;
+const LEADING_TAGS_RE = /^(?:\[[^\]]+\]\s*)+/;
+const TRAILING_METADATA_RE = /\s*(?:\[[^\]]+\]|\([^)]+\))\s*$/;
+const SERIES_TITLE_PATTERNS = [
+  /^(.*?)(?:\s*[-–—]\s*\d{1,4}(?:v\d+)?(?:\s|[(\[.]|$))/i,
+  /^(.*?)(?:\s+\b(?:EP|Episode)\s*\d{1,4}(?:v\d+)?(?:\s|[(\[.]|$))/i,
+  /^(.*?)(?:\s+\bS\d+E\d{1,4}(?:v\d+)?(?:\s|[(\[.]|$))/i,
+  /^(.*?)(?:\s+#\d{1,4}(?:v\d+)?(?:\s|[(\[.]|$))/i,
+  /^(.*?)(?:\s+第?\d{1,4}[話弾](?:\s|[(\[.]|$))/u
+];
+
+function trimTrailingMetadata(value: string): string {
+  let current = value.trim();
+  while (true) {
+    const next = current.replace(TRAILING_METADATA_RE, "").trim();
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+}
+
+function cleanupSeriesTitle(value: string): string {
+  return trimTrailingMetadata(
+    value
+      .replace(FILE_EXTENSION_RE, "")
+      .replace(LEADING_TAGS_RE, "")
+      .replace(HASH_BRACKET_RE, "")
+      .replace(/\s*[-–—:]+\s*$/, "")
+      .trim()
+  );
+}
+
+export function extractSeriesTitle(title: string): string {
+  const cleaned = title
+    .replace(FILE_EXTENSION_RE, "")
+    .replace(LEADING_TAGS_RE, "")
+    .replace(HASH_BRACKET_RE, "")
+    .trim();
+
+  for (const pattern of SERIES_TITLE_PATTERNS) {
+    const match = pattern.exec(cleaned);
+    if (match?.[1]) {
+      return cleanupSeriesTitle(match[1]);
+    }
+  }
+
+  return cleanupSeriesTitle(cleaned);
+}
 
 export function parseTitle(title: string): ParsedTitle {
   const group = GROUP_RE.exec(title)?.[1] ?? "";

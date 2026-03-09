@@ -32,12 +32,18 @@ export type RssFetchResponse = {
   error?: string;
 };
 
+export type RssFetchRequest = {
+  query: string;
+  category: string;
+  filter: string;
+};
+
 export type TitleResolutionResponse = {
   titles: string[];
   error?: string;
 };
 
 export type ProviderContext = {
-  fetchRss(query: string): Promise<RssFetchResponse>;
+  fetchRss(request: RssFetchRequest): Promise<RssFetchResponse>;
   resolveTitles(name: string): Promise<TitleResolutionResponse>;
 };

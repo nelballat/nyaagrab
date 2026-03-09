@@ -109,6 +109,11 @@ button, input, select { font: inherit; }
   padding: 12px 14px 14px;
 }
 
+.app-shell--results.app-shell--stacked {
+  grid-template-columns: 1fr;
+  padding: 10px;
+}
+
 .results-stack {
   min-width: 0;
   display: grid;
@@ -140,7 +145,7 @@ button, input, select { font: inherit; }
 }
 
 .hero-content {
-  width: min(100%, 860px);
+  width: min(100%, 980px);
   margin: 0 auto;
   transition:
     width 0.35s ease,
@@ -499,13 +504,18 @@ button, input, select { font: inherit; }
 }
 
 .row--primary {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
 }
 
-.row--secondary {
+.row--secondary-fields {
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
+}
+
+.row--search-source {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
 }
 
 label {
@@ -1066,7 +1076,11 @@ button.release-alts-toggle:focus-visible {
     font-size: 2.4rem;
   }
 
-  .row--secondary {
+  .row--secondary-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .row--search-source {
     grid-template-columns: 1fr;
   }
 
@@ -1092,7 +1106,7 @@ button.release-alts-toggle:focus-visible {
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 900px) {
   .app-shell--results {
     grid-template-columns: 1fr;
     padding: 10px;
@@ -1104,11 +1118,5 @@ button.release-alts-toggle:focus-visible {
 
   .app-shell--results .panel--hero {
     position: static;
-  }
-}
-
-@media (max-width: 1220px) {
-  .app-shell--idle .row--primary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

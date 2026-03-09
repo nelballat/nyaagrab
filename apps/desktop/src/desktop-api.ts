@@ -3,16 +3,17 @@ import type { SearchRequest } from "@nyaagrab/contracts";
 import { SearchRequestSchema } from "@nyaagrab/contracts";
 import { parseRss, searchEpisodes } from "@nyaagrab/core";
 import type { SearchProgressUpdate } from "@nyaagrab/core";
+import type { RssFetchRequest } from "@nyaagrab/core";
 
 type DesktopSearchProvider = {
-  fetchRss(query: string): Promise<{ items: ReturnType<typeof parseRss>; error?: string }>;
+  fetchRss(request: RssFetchRequest): Promise<{ items: ReturnType<typeof parseRss>; error?: string }>;
   resolveTitles(name: string): Promise<{ titles: string[]; error?: string }>;
 };
 
 function createProvider(): DesktopSearchProvider {
   return {
-    async fetchRss(query: string) {
-      const response = await invoke<{ text?: string; error?: string }>("fetch_nyaa_rss", { query });
+    async fetchRss(request: RssFetchRequest) {
+      const response = await invoke<{ text?: string; error?: string }>("fetch_nyaa_rss", request);
       if (response.error || !response.text) {
         return { items: [], error: response.error ?? "empty response" };
       }

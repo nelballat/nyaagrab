@@ -1,9 +1,42 @@
 import { z } from "zod";
 
+export const NyaaCategorySchema = z.enum([
+  "0_0",
+  "1_0",
+  "1_1",
+  "1_2",
+  "1_3",
+  "1_4",
+  "2_0",
+  "2_1",
+  "2_2",
+  "3_0",
+  "3_1",
+  "3_2",
+  "3_3",
+  "4_0",
+  "4_1",
+  "4_2",
+  "4_3",
+  "4_4",
+  "5_0",
+  "5_1",
+  "5_2",
+  "6_0",
+  "6_1",
+  "6_2"
+]);
+
+export const NyaaFilterSchema = z.enum(["0", "1", "2"]);
+export const ResultShapeSchema = z.enum(["auto", "batchesOnly", "episodesOnly"]);
+
 export const SearchRequestSchema = z.object({
   anime: z.string().min(1),
   startEpisode: z.number().int().positive(),
   endEpisode: z.number().int().positive(),
+  category: NyaaCategorySchema,
+  filter: NyaaFilterSchema,
+  resultShape: ResultShapeSchema,
   preferSmall: z.boolean(),
   preferredResolution: z.string().min(1),
   preferredCodec: z.string().min(1),
@@ -53,3 +86,6 @@ export type SearchRequest = z.infer<typeof SearchRequestSchema>;
 export type ReleaseCandidate = z.infer<typeof ReleaseCandidateSchema>;
 export type EpisodeResult = z.infer<typeof EpisodeResultSchema>;
 export type SearchResult = z.infer<typeof SearchResultSchema>;
+export type NyaaCategory = z.infer<typeof NyaaCategorySchema>;
+export type NyaaFilter = z.infer<typeof NyaaFilterSchema>;
+export type ResultShape = z.infer<typeof ResultShapeSchema>;
