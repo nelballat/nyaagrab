@@ -8,7 +8,10 @@ import type {
   SearchResult
 } from "@nyaagrab/contracts";
 import { SearchRequestSchema } from "@nyaagrab/contracts";
+import { formatSize, parseTitle } from "@nyaagrab/core";
 import { exportMagnets, openMagnet, runSearch, copyText } from "./desktop-api";
+import { getBaseMascotState, MascotDisplay } from "./mascot";
+import type { MascotState } from "./mascot";
 
 const defaultRequest: SearchRequest = {
   anime: "",
@@ -91,15 +94,7 @@ function loadStoredFormState(): StoredFormState {
   }
 }
 
-function formatSize(bytes: number): string {
-  if (bytes >= 1024 ** 3) {
-    return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
-  }
-  if (bytes >= 1024 ** 2) {
-    return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
-  }
-  return `${(bytes / 1024).toFixed(1)} KiB`;
-}
+
 
 function bestMagnets(result: SearchResult | null): string[] {
   if (!result) {
@@ -148,25 +143,6 @@ function clampLeftPaneWidth(nextWidth: number, containerWidth: number): number {
   return Math.min(Math.max(nextWidth, MIN_LEFT_PANE_WIDTH), Math.max(MIN_LEFT_PANE_WIDTH, upperBound));
 }
 
-/* ── Mascot state mapping ── */
-type MascotState = "idle" | "searching" | "success" | "perfect" | "missing";
-
-const MASCOT_IMAGES: Record<MascotState, { primary: string; fallback: string }> = {
-  idle: { primary: "/mascot/idle.jpg", fallback: "/mascot/header.jpg" },
-  searching: { primary: "/mascot/searching.jpg", fallback: "/mascot/header.jpg" },
-  success: { primary: "/mascot/success.jpg", fallback: "/mascot/header.jpg" },
-  perfect: { primary: "/mascot/success.jpg", fallback: "/mascot/header.jpg" },
-  missing: { primary: "/mascot/missing.jpg", fallback: "/mascot/header.jpg" }
-};
-
-function getMascotState(busy: boolean, result: SearchResult | null): MascotState {
-  if (busy) return "searching";
-  if (!result) return "idle";
-  if (result.coveragePercent >= 100) return "perfect";
-  if (result.coveragePercent > 0) return "success";
-  return "missing";
-}
-
 function getStatusClass(busy: boolean, result: SearchResult | null): string {
   if (busy) return "status status--busy";
   if (result && result.coveragePercent >= 80) return "status status--ok";
@@ -174,43 +150,22 @@ function getStatusClass(busy: boolean, result: SearchResult | null): string {
   return "status";
 }
 
-/* ── Mascot component ── */
-function MascotDisplay({ state }: { state: MascotState }) {
-  const [src, setSrc] = useState(MASCOT_IMAGES[state].primary);
-
-  useEffect(() => {
-    setSrc(MASCOT_IMAGES[state].primary);
-  }, [state]);
-
-  return (
-    <div className={`mascot-container${state === "searching" ? " searching" : ""}`}>
-      <img
-        src={src}
-        alt={`NyaaGrab mascot — ${state}`}
-        draggable={false}
-        onError={() => {
-          if (src !== MASCOT_IMAGES[state].fallback) {
-            setSrc(MASCOT_IMAGES[state].fallback);
-          }
-        }}
-      />
-    </div>
-  );
-}
-
 /* ── Episode table ── */
 function EpisodeTable({
   episodes,
+  batchGroups,
   onCopyMagnet,
   onOpenMagnet
 }: {
   episodes: EpisodeResult[];
+  batchGroups?: Array<{ best: EpisodeResult["best"]; episodes: number[]; batchStart: number | null; batchEnd: number | null }>;
   onCopyMagnet: (magnet: string) => void;
   onOpenMagnet: (magnet: string) => Promise<void>;
 }) {
   const [expandedEpisodes, setExpandedEpisodes] = useState<number[]>([]);
 
-  if (episodes.length === 0) {
+  const hasBatches = batchGroups && batchGroups.length > 0;
+  if (episodes.length === 0 && !hasBatches) {
     return <p className="empty">No found episodes yet.</p>;
   }
 
@@ -242,8 +197,42 @@ function EpisodeTable({
           </tr>
         </thead>
         <tbody>
+          {hasBatches ? batchGroups.map((batch) => {
+            if (!batch.best) { return null; }
+            const eps = batch.episodes;
+            const rangeLabel = batch.batchStart !== null && batch.batchEnd !== null
+              ? `batch ep ${batch.batchStart}–${batch.batchEnd}`
+              : "batch pack";
+            const coverLabel = `${rangeLabel} · covers ${eps.length} of your episodes`;
+            return (
+              <Fragment key={`batch-${batch.best.magnet}`}>
+                <tr className="episode-row">
+                  <td className="release-cell col-release">
+                    <div className="release-primary__title">{cleanReleaseTitle(batch.best.title)}</div>
+                  </td>
+                  <td className="col-group">{batch.best.group || "-"}</td>
+                  <td className="col-size">{batch.best.sizeLabel}</td>
+                  <td className="col-seeders">{batch.best.seeders}</td>
+                  <td className="col-actions">
+                    <div className="actions">
+                      <button onClick={async () => onOpenMagnet(batch.best!.magnet)}>Open</button>
+                      <button onClick={() => onCopyMagnet(batch.best!.magnet)}>Copy</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr className="episode-toggle-row episode-toggle-row--last">
+                  <td colSpan={5} className="episode-toggle-row__cell">
+                    <span className="release-batch-cover">{coverLabel} ({eps.length} episodes)</span>
+                  </td>
+                </tr>
+              </Fragment>
+            );
+          }) : null}
           {episodes.map((episode) => {
-            const best = episode.best!;
+            const best = episode.best;
+            if (!best) {
+              return null;
+            }
             const visibleAlternatives = episode.alternatives.filter((alternative) => alternative.seeders > 0);
             const expanded = expandedEpisodes.includes(episode.episode);
             return (
@@ -323,6 +312,8 @@ function EpisodeTable({
 /* ── Main app ── */
 export function App() {
   const shellRef = useRef<HTMLElement | null>(null);
+  const mascotOverrideTimerRef = useRef<number | null>(null);
+  const mascotTapResetTimerRef = useRef<number | null>(null);
   const [storedFormState] = useState(() => loadStoredFormState());
   const [request, setRequest] = useState<SearchRequest>(storedFormState.request);
   const [groupInput, setGroupInput] = useState(storedFormState.groupInput);
@@ -334,6 +325,9 @@ export function App() {
   const [leftPaneWidth, setLeftPaneWidth] = useState(430);
   const [isResizing, setIsResizing] = useState(false);
   const [canResizeSplit, setCanResizeSplit] = useState(() => typeof window === "undefined" ? true : canUseResizableSplit(window.innerWidth));
+  const [mascotOverride, setMascotOverride] = useState<MascotState | null>(null);
+  const [mascotTapCount, setMascotTapCount] = useState(0);
+  const searchControllerRef = useRef<AbortController | null>(null);
 
   const visibleEpisodes = useMemo(() => {
     if (busy) {
@@ -343,6 +337,35 @@ export function App() {
   }, [busy, liveEpisodes, result]);
 
   const foundEpisodes = useMemo(() => visibleEpisodes.filter((episode) => episode.status === "found"), [visibleEpisodes]);
+  const groupedResults = useMemo(() => {
+    const hashGroups = new Map<string, EpisodeResult[]>();
+    const individuals: EpisodeResult[] = [];
+    for (const ep of foundEpisodes) {
+      if (!ep.best) { continue; }
+      const hash = ep.best.magnet;
+      if (!hashGroups.has(hash)) { hashGroups.set(hash, []); }
+      hashGroups.get(hash)!.push(ep);
+    }
+    const batches: Array<{ best: EpisodeResult["best"]; alternatives: EpisodeResult["alternatives"]; episodes: number[]; batchStart: number | null; batchEnd: number | null }> = [];
+    for (const [, group] of hashGroups) {
+      if (group.length >= 2) {
+        const eps = group.map((ep) => ep.episode).sort((a, b) => a - b);
+        const allAlts = new Map<string, EpisodeResult["alternatives"][number]>();
+        for (const ep of group) {
+          for (const alt of ep.alternatives) {
+            if (!allAlts.has(alt.magnet)) { allAlts.set(alt.magnet, alt); }
+          }
+        }
+        const parsed = group[0].best ? parseTitle(group[0].best.title) : { batchStart: null, batchEnd: null };
+        batches.push({ best: group[0].best, alternatives: [...allAlts.values()], episodes: eps, batchStart: parsed.batchStart, batchEnd: parsed.batchEnd });
+      } else {
+        individuals.push(group[0]);
+      }
+    }
+    batches.sort((a, b) => (b.episodes.length - a.episodes.length));
+    individuals.sort((a, b) => a.episode - b.episode);
+    return { batches, individuals };
+  }, [foundEpisodes]);
   const missingEpisodes = useMemo(() => visibleEpisodes.filter((episode) => episode.status === "missing"), [visibleEpisodes]);
   const failedEpisodes = useMemo(() => visibleEpisodes.filter((episode) => episode.status === "failed"), [visibleEpisodes]);
   const visibleEpisodeTotal = progressCounts?.total ?? visibleEpisodes.length;
@@ -353,7 +376,17 @@ export function App() {
     return (foundEpisodes.length / visibleEpisodeTotal) * 100;
   }, [foundEpisodes.length, visibleEpisodeTotal]);
   const visibleTotalBestSizeBytes = useMemo(
-    () => visibleEpisodes.reduce((sum, episode) => sum + (episode.best?.sizeBytes ?? 0), 0),
+    () => {
+      const seen = new Set<string>();
+      let total = 0;
+      for (const episode of visibleEpisodes) {
+        if (!episode.best) { continue; }
+        if (seen.has(episode.best.magnet)) { continue; }
+        seen.add(episode.best.magnet);
+        total += episode.best.sizeBytes;
+      }
+      return total;
+    },
     [visibleEpisodes]
   );
   const summaryItems = useMemo(() => {
@@ -365,7 +398,7 @@ export function App() {
           ? `${progressCounts?.completed ?? visibleEpisodes.length}/${progressCounts?.total ?? "?"}`
           : `${foundEpisodes.length}/${visibleEpisodeTotal}`
       },
-      { label: "Total size", value: formatSize(busy ? visibleTotalBestSizeBytes : result?.totalBestSizeBytes ?? 0) }
+      { label: "Total size", value: formatSize(visibleTotalBestSizeBytes) }
     ];
 
     if (missingEpisodes.length > 0) {
@@ -390,7 +423,7 @@ export function App() {
     visibleTotalBestSizeBytes
   ]);
 
-  const mascotState = getMascotState(busy, result);
+  const mascotState = mascotOverride ?? getBaseMascotState(busy, result);
   const hasResultsSurface = result !== null || liveEpisodes.length > 0;
   const shellClassName = hasResultsSurface
     ? `app-shell app-shell--results${canResizeSplit ? "" : " app-shell--stacked"}`
@@ -456,9 +489,50 @@ export function App() {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   }, [groupInput, request]);
 
+  useEffect(() => () => {
+    if (mascotOverrideTimerRef.current !== null) {
+      window.clearTimeout(mascotOverrideTimerRef.current);
+    }
+    if (mascotTapResetTimerRef.current !== null) {
+      window.clearTimeout(mascotTapResetTimerRef.current);
+    }
+  }, []);
+
+  const triggerMascotOverride = (state: MascotState, durationMs = 1800) => {
+    if (mascotOverrideTimerRef.current !== null) {
+      window.clearTimeout(mascotOverrideTimerRef.current);
+    }
+    setMascotOverride(state);
+    mascotOverrideTimerRef.current = window.setTimeout(() => {
+      setMascotOverride(null);
+      mascotOverrideTimerRef.current = null;
+    }, durationMs);
+  };
+
+  const handleMascotActivate = () => {
+    if (mascotTapResetTimerRef.current !== null) {
+      window.clearTimeout(mascotTapResetTimerRef.current);
+    }
+    const nextTapCount = mascotTapCount + 1;
+    if (nextTapCount >= 5) {
+      setMascotTapCount(0);
+      setStatus("Mascot easter egg unlocked.");
+      triggerMascotOverride("easterEgg", 3200);
+      return;
+    }
+    setMascotTapCount(nextTapCount);
+    mascotTapResetTimerRef.current = window.setTimeout(() => {
+      setMascotTapCount(0);
+      mascotTapResetTimerRef.current = null;
+    }, 1800);
+  };
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    const controller = new AbortController();
+    searchControllerRef.current = controller;
     setBusy(true);
+    setMascotOverride(null);
     setStatus("Searching...");
     setResult(null);
     setLiveEpisodes([]);
@@ -475,21 +549,58 @@ export function App() {
             .sort((left, right) => left.episode - right.episode)
         ));
         setProgressCounts({ completed: update.completed, total: update.total });
-      });
-      setResult(searchResult);
-      setLiveEpisodes(searchResult.episodes);
-      setStatus(`Completed: ${searchResult.coveragePercent.toFixed(0)}% coverage`);
+      }, controller.signal);
+      if (controller.signal.aborted) {
+        buildPartialResult();
+      } else {
+        setResult(searchResult);
+        setLiveEpisodes(searchResult.episodes);
+        setStatus(`Completed: ${searchResult.coveragePercent.toFixed(0)}% coverage`);
+      }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Search failed");
+      if (controller.signal.aborted) {
+        buildPartialResult();
+      } else {
+        setStatus(error instanceof Error ? error.message : "Search failed");
+        triggerMascotOverride("error", 2400);
+      }
     } finally {
       setBusy(false);
+      searchControllerRef.current = null;
     }
   };
 
+  const buildPartialResult = () => {
+    setLiveEpisodes((current) => {
+      const foundCount = current.filter((ep) => ep.status === "found").length;
+      const totalBestSizeBytes = current.reduce((sum, ep) => sum + (ep.best?.sizeBytes ?? 0), 0);
+      setResult({
+        anime: request.anime,
+        episodes: current,
+        coveragePercent: current.length === 0 ? 0 : (foundCount / current.length) * 100,
+        totalRequests: 0,
+        elapsedMs: 0,
+        totalBestSizeBytes
+      });
+      return current;
+    });
+    setStatus("Stopped — showing partial results");
+  };
+
+  const stopSearch = () => {
+    searchControllerRef.current?.abort();
+  };
+
   const exportAll = async () => {
-    const content = bestMagnets(result).join("\n");
-    const path = await exportMagnets(`${request.anime || "nyaagrab"}-magnets.txt`, content);
-    setStatus(`Exported magnets to ${path.path}`);
+    try {
+      const content = bestMagnets(result).join("\n");
+      const path = await exportMagnets(`${request.anime || "nyaagrab"}-magnets.txt`, content);
+      setStatus(`Exported magnets to ${path.path}`);
+      triggerMascotOverride("exporting");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not export magnets");
+      triggerMascotOverride("error", 2400);
+    }
   };
 
   const openSingleMagnet = async (magnet: string) => {
@@ -498,6 +609,17 @@ export function App() {
       setStatus("Sent magnet to the OS. If nothing opened, check your default torrent app / magnet association.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not open magnet");
+    }
+  };
+
+  const copyMagnetText = async (value: string) => {
+    try {
+      await copyText(value);
+      setStatus(value.includes("\n") ? "Copied all magnets to the clipboard." : "Copied magnet to the clipboard.");
+      triggerMascotOverride("copying");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not copy magnet");
+      triggerMascotOverride("error", 2400);
     }
   };
 
@@ -510,7 +632,7 @@ export function App() {
       <section className="panel panel--hero">
         <div className="hero-content">
           <div className="app-header">
-            <MascotDisplay state={mascotState} />
+            <MascotDisplay state={mascotState} onActivate={handleMascotActivate} />
             <div className="header-text">
               <h1>NyaaGrab</h1>
               <p className="subtle">Batch search Nyaa.</p>
@@ -631,9 +753,13 @@ export function App() {
               </label>
             </div>
             <div className="row">
-              <button type="submit" disabled={busy}>{busy ? "Searching..." : "Search"}</button>
+              {busy ? (
+                <button type="button" className="btn--stop" onClick={stopSearch}>Stop</button>
+              ) : (
+                <button type="submit">Search</button>
+              )}
               <button type="button" disabled={!result} onClick={exportAll}>Export magnets</button>
-              <button type="button" disabled={!result} onClick={() => copyText(bestMagnets(result).join("\n"))}>Copy magnets</button>
+              <button type="button" disabled={!result} onClick={async () => copyMagnetText(bestMagnets(result).join("\n"))}>Copy magnets</button>
             </div>
           </form>
           {showStatus ? (
@@ -673,7 +799,12 @@ export function App() {
 
           <section className="panel">
             <h2>Found Episodes</h2>
-            <EpisodeTable episodes={foundEpisodes} onCopyMagnet={(magnet) => copyText(magnet)} onOpenMagnet={openSingleMagnet} />
+            <EpisodeTable
+              episodes={groupedResults.individuals}
+              batchGroups={groupedResults.batches}
+              onCopyMagnet={(magnet) => { void copyMagnetText(magnet); }}
+              onOpenMagnet={openSingleMagnet}
+            />
           </section>
 
           {missingEpisodes.length > 0 ? (
