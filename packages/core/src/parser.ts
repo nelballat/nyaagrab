@@ -9,7 +9,8 @@ const EP_PATTERNS = [
   /(?:^|\D)#(\d{1,4})(?:v(\d+))?(?:\s|[(\[.]|$)/i,
   /(?:^|\D)第?(\d{1,4})[話弾](?:\s|[(\[.]|$)/u
 ];
-const BATCH_RANGE_RE = /(\d{2,4})\s*[-–~]\s*(\d{2,4})/;
+const BATCH_RANGE_RE = /(\d{1,4})\s*[-–~]\s*(\d{1,4})/;
+const BATCH_KEYWORD_RE = /\b(?:batch|complete\s*series)\b/i;
 const MOVIE_RE = /\bMovie\b/i;
 const SPECIAL_RE = /\b(?:Special|OVA|OAD|ONA|Recap|Preview|Fan\s*Letter)\b/i;
 const GROUP_RE = /^\[([^\]]+)\]/;
@@ -98,12 +99,15 @@ export function parseTitle(title: string): ParsedTitle {
   if (batch) {
     const start = Number.parseInt(batch[1], 10);
     const end = Number.parseInt(batch[2], 10);
-    if (end > start && !RESOLUTION_NUMS.has(start) && !RESOLUTION_NUMS.has(end)) {
+    if (end > start && !RESOLUTION_NUMS.has(start) && !RESOLUTION_NUMS.has(end) && !(start >= 1990 && end >= 1990)) {
       result.isBatch = true;
       result.batchStart = start;
       result.batchEnd = end;
       return result;
     }
+  }
+  if (!result.isBatch && BATCH_KEYWORD_RE.test(title)) {
+    result.isBatch = true;
   }
 
   const cleaned = title.replace(HASH_BRACKET_RE, "");
