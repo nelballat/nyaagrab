@@ -29,9 +29,13 @@ function createProvider(): DesktopSearchProvider {
   };
 }
 
-export async function runSearch(input: SearchRequest, onEpisodeProcessed?: (update: SearchProgressUpdate) => void) {
+export async function runSearch(
+  input: SearchRequest,
+  onEpisodeProcessed?: (update: SearchProgressUpdate) => void,
+  signal?: AbortSignal
+) {
   const request = SearchRequestSchema.parse(input);
-  return searchEpisodes(request, createProvider(), { onEpisodeProcessed });
+  return searchEpisodes(request, createProvider(), { onEpisodeProcessed, signal });
 }
 
 export async function exportMagnets(filenameHint: string, content: string) {

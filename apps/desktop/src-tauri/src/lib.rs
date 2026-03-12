@@ -1,4 +1,5 @@
 use std::{fs, process::Command, sync::OnceLock, time::Duration};
+use tokio::time::sleep;
 
 use reqwest::{
     header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT},
@@ -25,6 +26,7 @@ struct SavedFileResponse {
 }
 
 static NYAA_CLIENT: OnceLock<Client> = OnceLock::new();
+static ANILIST_CLIENT: OnceLock<Client> = OnceLock::new();
 
 fn build_nyaa_client() -> Result<Client, reqwest::Error> {
     let mut headers = HeaderMap::new();
@@ -71,6 +73,10 @@ async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> Text
     let mut last_error: Option<String> = None;
 
     for attempt in 1..=3 {
+        if attempt > 1 {
+            sleep(Duration::from_millis(500)).await;
+        }
+
         let response = client
             .get("https://nyaa.si/")
             .query(&[
@@ -85,10 +91,18 @@ async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> Text
 
         match response {
             Ok(response) => {
+                let status = response.status();
                 let response = match response.error_for_status() {
                     Ok(response) => response,
                     Err(error) => {
-                        last_error = Some(format!("request failed on attempt {attempt}: {error:#}"));
+                        let msg = format!("request failed on attempt {attempt}: {error:#}");
+                        if status.as_u16() == 429 {
+                            return TextResponse {
+                                text: None,
+                                error: Some(msg),
+                            };
+                        }
+                        last_error = Some(msg);
                         continue;
                     }
                 };
@@ -118,9 +132,28 @@ async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> Text
 
 #[tauri::command]
 async fn resolve_anilist_titles(name: String) -> TitleResponse {
-    let client = reqwest::Client::new();
+    let client = match ANILIST_CLIENT.get() {
+        Some(client) => client,
+        None => {
+            let built = match reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(15))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    return TitleResponse {
+                        titles: vec![],
+                        error: Some(format!("client build failed: {error:#}")),
+                    }
+                }
+            };
+            let _ = ANILIST_CLIENT.set(built);
+            ANILIST_CLIENT.get().unwrap()
+        }
+    };
     let payload = serde_json::json!({
-        "query": "query($search: String) { Media(search: $search, type: ANIME) { title { romaji english native } synonyms } }",
+        "query": "query($search: String) { Media(search: $search, type: ANIME) { title { romaji english native } } }",
         "variables": { "search": name }
     });
 
@@ -163,13 +196,6 @@ async fn resolve_anilist_titles(name: String) -> TitleResponse {
             titles.push(title.to_string());
         }
     }
-    if let Some(synonyms) = media["synonyms"].as_array() {
-        for synonym in synonyms {
-            if let Some(title) = synonym.as_str() {
-                titles.push(title.to_string());
-            }
-        }
-    }
 
     TitleResponse { titles, error: None }
 }
@@ -190,6 +216,13 @@ fn save_magnet_file(filename_hint: String, content: String) -> Result<SavedFileR
 
 #[tauri::command]
 fn open_target(target: String) -> Result<(), String> {
+    if !target.starts_with("magnet:")
+        && !target.starts_with("http://")
+        && !target.starts_with("https://")
+    {
+        return Err("blocked: target must use magnet:, http://, or https:// scheme".to_string());
+    }
+
     #[cfg(target_os = "windows")]
     let result = Command::new("rundll32")
         .args(["url.dll,FileProtocolHandler", &target])

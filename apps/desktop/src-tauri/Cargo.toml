@@ -17,4 +17,5 @@ reqwest = { version = "0.12.12", features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tauri = { version = "2.10.3", features = ["config-json5"] }
+tokio = { version = "1", features = ["time"] }
 rfd = "0.15.2"
