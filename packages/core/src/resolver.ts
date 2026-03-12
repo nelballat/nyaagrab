@@ -1,15 +1,17 @@
 import type { TitleResolutionResponse } from "./types";
 
-function isUsefulSynonym(text: string): boolean {
-  const cleaned = text.trim();
-  if (!cleaned || !/^[\x00-\x7F]+$/.test(cleaned)) {
+const JAPANESE_RE = /[\u3040-\u309F\u30A0-\u30FF]/;
+const NON_LATIN_RE = /[^\x00-\x7F\u00C0-\u024F]/;
+
+function isUsefulAlt(title: string): boolean {
+  if (JAPANESE_RE.test(title)) {
+    return true;
+  }
+  if (NON_LATIN_RE.test(title)) {
     return false;
   }
-  if (cleaned.length < 6) {
-    return false;
-  }
-  const letters = Array.from(cleaned).filter((char) => /[A-Za-z]/.test(char)).length;
-  return letters >= 4;
+  const words = title.trim().split(/\s+/);
+  return words.length >= 3 && title.length >= 20;
 }
 
 export function normalizeResolvedTitles(name: string, response: TitleResolutionResponse): string[] {
@@ -22,10 +24,10 @@ export function normalizeResolvedTitles(name: string, response: TitleResolutionR
   const seen = new Set([name.toLocaleLowerCase()]);
   for (const title of sourceTitles) {
     const lowered = title.toLocaleLowerCase();
-    if (seen.has(lowered)) {
+    if (seen.has(lowered) || title === name) {
       continue;
     }
-    if (title !== name && (!title.includes(" ") || isUsefulSynonym(title) || /[^\x00-\x7F]/.test(title))) {
+    if (isUsefulAlt(title)) {
       titles.push(title);
       seen.add(lowered);
     }
