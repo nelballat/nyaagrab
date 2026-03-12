@@ -6,12 +6,14 @@ import { DEFAULT_PREFERRED_GROUPS, HEVC_CODECS } from "./constants";
 import { normalizeResolvedTitles } from "./resolver";
 import type { ProviderContext, RssFetchRequest, TorrentRecord } from "./types";
 
-const EPISODE_SEARCH_CONCURRENCY = 6;
-const ALT_TITLE_SEARCH_CONCURRENCY = 3;
-const RSS_FETCH_CONCURRENCY = 6;
+const EPISODE_SEARCH_CONCURRENCY = 3;
+const ALT_TITLE_SEARCH_CONCURRENCY = 2;
+const RSS_FETCH_CONCURRENCY = 2;
 const QUERY_VARIANT_CONCURRENCY = 3;
 const AUTO_COLLECTION_SCORE_PENALTY = 400;
 const COLLECTION_SCORE_PENALTY = 3000;
+const BATCH_SKIP_SEEDER_THRESHOLD = 5;
+const BATCH_PRESCAN_KEYWORDS = ["batch", "collection"];
 const COLLECTION_SUFFIX_TOKENS = new Set([
   "batch",
   "complete",
@@ -43,6 +45,7 @@ const ROMAN_NUMERAL_RE = /\b(ii|iii|iv|v|vi|vii|viii|ix|x)\b/gi;
 const TITLE_TAG_PREFIX_RE = /^(?:\[[^\]]+\]\s*)+/;
 const TITLE_FILE_EXTENSION_RE = /\.[a-z0-9]{2,4}$/i;
 const TITLE_HASH_TAG_RE = /\[[0-9A-Fa-f]{6,}\]/g;
+const RSS_FETCH_DELAY_MS = 200;
 
 export type SearchProgressUpdate = {
   episodeResult: EpisodeResult;
@@ -52,6 +55,7 @@ export type SearchProgressUpdate = {
 
 type SearchOptions = {
   onEpisodeProcessed?: (update: SearchProgressUpdate) => void;
+  signal?: AbortSignal;
 };
 
 function normalizeSearchText(value: string): string {
@@ -418,21 +422,29 @@ function filterDeadCandidates(matches: TorrentRecord[]): TorrentRecord[] {
   return matches.filter((match) => match.seeders > 0);
 }
 
+// The shared `nextIndex` looks like a data race but is safe: JavaScript is
+// single-threaded, so the read-increment-assign sequence between `nextIndex`
+// and `currentIndex` runs atomically before each `await` yields to the
+// microtask queue.  Do not "fix" this by adding locks or atomics.
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
   concurrency: number,
-  mapper: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
+  mapper: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal
+): Promise<(R | undefined)[]> {
   if (items.length === 0) {
     return [];
   }
 
   const limit = Math.max(1, Math.min(concurrency, items.length));
-  const results = new Array<R>(items.length);
+  const results = new Array<R | undefined>(items.length);
   let nextIndex = 0;
 
   await Promise.all(Array.from({ length: limit }, async () => {
     while (nextIndex < items.length) {
+      if (signal?.aborted) {
+        break;
+      }
       const currentIndex = nextIndex;
       nextIndex += 1;
       results[currentIndex] = await mapper(items[currentIndex], currentIndex);
@@ -442,7 +454,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function createConcurrencyLimiter(limit: number) {
+function createConcurrencyLimiter(limit: number, delayMs = 0) {
   let activeCount = 0;
   const queue: Array<() => void> = [];
 
@@ -450,8 +462,15 @@ function createConcurrencyLimiter(limit: number) {
     activeCount -= 1;
     const next = queue.shift();
     if (next) {
-      activeCount += 1;
-      next();
+      if (delayMs > 0) {
+        setTimeout(() => {
+          activeCount += 1;
+          next();
+        }, delayMs);
+      } else {
+        activeCount += 1;
+        next();
+      }
     }
   };
 
@@ -471,7 +490,7 @@ function createConcurrencyLimiter(limit: number) {
 }
 
 function createLimitedProviders(providers: ProviderContext): ProviderContext {
-  const runLimitedFetch = createConcurrencyLimiter(RSS_FETCH_CONCURRENCY);
+  const runLimitedFetch = createConcurrencyLimiter(RSS_FETCH_CONCURRENCY, RSS_FETCH_DELAY_MS);
 
   return {
     fetchRss(request: RssFetchRequest) {
@@ -488,12 +507,44 @@ type EpisodeSearchOutcome = {
   requestCount: number;
 };
 
+async function discoverBatchPacks(
+  titles: string[],
+  request: SearchRequest,
+  providers: ProviderContext,
+  signal?: AbortSignal
+): Promise<{ packs: TorrentRecord[]; requestCount: number }> {
+  const queries = uniqueNonEmpty(
+    titles.flatMap((title) => BATCH_PRESCAN_KEYWORDS.map((kw) => `${title} ${kw}`))
+  );
+  const seen = new Set<string>();
+  const packs: TorrentRecord[] = [];
+  let requestCount = 0;
+  const responses = await fetchQueries(queries, request, providers);
+  requestCount += responses.length;
+  for (const entry of responses) {
+    if (signal?.aborted) { break; }
+    if (!entry.response || entry.response.error) { continue; }
+    for (const title of titles) {
+      packs.push(...matchCollections(entry.response.items, title, seen));
+    }
+  }
+  return { packs: filterDeadCandidates(packs), requestCount };
+}
+
+function batchCoversEpisode(pack: TorrentRecord, episode: number): boolean {
+  const parsed = parseTitle(pack.title);
+  if (parsed.batchStart !== null && parsed.batchEnd !== null) {
+    return episode >= parsed.batchStart && episode <= parsed.batchEnd;
+  }
+  return false;
+}
+
 async function fetchQueries(
   queries: string[],
   request: SearchRequest,
   providers: ProviderContext
 ): Promise<Array<{ query: string; response: Awaited<ReturnType<ProviderContext["fetchRss"]>> }>> {
-  return mapWithConcurrency(
+  const raw = await mapWithConcurrency(
     uniqueNonEmpty(queries),
     QUERY_VARIANT_CONCURRENCY,
     async (query) => ({
@@ -505,14 +556,29 @@ async function fetchQueries(
       })
     })
   );
+  return raw.filter(<T>(v: T | undefined): v is T => v !== undefined && (v as any).response !== undefined);
 }
 
 async function searchEpisode(
   episode: number,
   request: SearchRequest,
   altTitlesPromise: Promise<string[]>,
-  providers: ProviderContext
+  providers: ProviderContext,
+  signal?: AbortSignal,
+  preMatchedBatches?: TorrentRecord[]
 ): Promise<EpisodeSearchOutcome> {
+  const collectionMatches = preMatchedBatches ? [...preMatchedBatches] : [];
+  const bestConfirmedSeeders = collectionMatches.reduce((max, t) => {
+    const p = parseTitle(t.title);
+    return (p.batchStart !== null && p.batchEnd !== null) ? Math.max(max, t.seeders) : max;
+  }, 0);
+  if (request.resultShape === "batchesOnly") {
+    return buildEpisodeSearchOutcome(episode, request, [], [], collectionMatches, 0);
+  }
+  if (request.resultShape === "auto" && bestConfirmedSeeders >= BATCH_SKIP_SEEDER_THRESHOLD) {
+    return buildEpisodeSearchOutcome(episode, request, [], [], collectionMatches, 0);
+  }
+
   const seenInfoHashes = new Set<string>();
   const errors: string[] = [];
   let requestCount = 0;
@@ -520,19 +586,17 @@ async function searchEpisode(
   const primaryResponses = await fetchQueries(buildEpisodeQueries(request.anime, episode), request, providers);
   requestCount += primaryResponses.length;
   let primaryMatches: TorrentRecord[] = [];
-  let primaryCollectionMatches: TorrentRecord[] = [];
   for (const { response } of primaryResponses) {
     if (response.error) {
       errors.push(response.error);
       continue;
     }
     primaryMatches = primaryMatches.concat(matchEpisode(response.items, request.anime, episode, seenInfoHashes));
-    primaryCollectionMatches = primaryCollectionMatches.concat(matchCollections(response.items, request.anime, seenInfoHashes));
+    collectionMatches.push(...matchCollections(response.items, request.anime, seenInfoHashes));
   }
 
   let matches = [...primaryMatches];
-  let collectionMatches = [...primaryCollectionMatches];
-  if (needsAltSearch(primaryMatches, request)) {
+  if (!signal?.aborted && needsAltSearch(primaryMatches, request)) {
     const altTitles = await altTitlesPromise;
     if (altTitles.length > 0) {
       const altResults = await mapWithConcurrency(
@@ -541,10 +605,13 @@ async function searchEpisode(
         async (altTitle) => {
           const responses = await fetchQueries(buildEpisodeQueries(altTitle, episode), request, providers);
           return { altTitle, responses };
-        }
+        },
+        signal
       );
 
-      for (const { altTitle, responses } of altResults) {
+      for (const entry of altResults) {
+        if (!entry) { continue; }
+        const { altTitle, responses } = entry;
         requestCount += responses.length;
         for (const { response } of responses) {
           if (response.error) {
@@ -553,30 +620,9 @@ async function searchEpisode(
           }
           matches = matches.concat(matchEpisode(response.items, altTitle, episode, seenInfoHashes));
           if (canUseCollectionFallbackTitle(altTitle)) {
-            collectionMatches = collectionMatches.concat(matchCollections(response.items, altTitle, seenInfoHashes));
+            collectionMatches.push(...matchCollections(response.items, altTitle, seenInfoHashes));
           }
         }
-      }
-    }
-  }
-
-  if (filterDeadCandidates(matches).length === 0) {
-    const collectionTitles = [
-      request.anime,
-      ...(await altTitlesPromise).filter((title) => canUseCollectionFallbackTitle(title))
-    ];
-    const collectionQueries = uniqueNonEmpty([
-      ...collectionTitles.flatMap((title, index) => buildTitleQueryVariants(title))
-    ]);
-    const collectionResponses = await fetchQueries(collectionQueries, request, providers);
-    requestCount += collectionResponses.length;
-    for (const { response } of collectionResponses) {
-      if (response.error) {
-        errors.push(response.error);
-        continue;
-      }
-      for (const title of collectionTitles) {
-        collectionMatches = collectionMatches.concat(matchCollections(response.items, title, seenInfoHashes));
       }
     }
   }
@@ -715,11 +761,18 @@ export async function searchEpisodes(input: SearchRequest, providers: ProviderCo
   );
   let completedCount = 0;
 
+  const allTitles = await altTitlesPromise.then((alts) => [request.anime, ...alts]);
+  const batchPrescan = request.resultShape !== "episodesOnly"
+    ? await discoverBatchPacks(allTitles, request, limitedProviders, options.signal)
+    : { packs: [] as TorrentRecord[], requestCount: 0 };
+  let prescanRequests = batchPrescan.requestCount;
+
   const outcomes = await mapWithConcurrency(
     episodeNumbers,
     EPISODE_SEARCH_CONCURRENCY,
     async (episode) => {
-      const outcome = await searchEpisode(episode, request, altTitlesPromise, limitedProviders);
+      const episodeBatches = batchPrescan.packs.filter((pack) => batchCoversEpisode(pack, episode));
+      const outcome = await searchEpisode(episode, request, altTitlesPromise, limitedProviders, options.signal, episodeBatches);
       completedCount += 1;
       options.onEpisodeProcessed?.({
         episodeResult: outcome.episodeResult,
@@ -727,11 +780,13 @@ export async function searchEpisodes(input: SearchRequest, providers: ProviderCo
         total: totalEpisodes
       });
       return outcome;
-    }
+    },
+    options.signal
   );
 
-  const episodes = outcomes.map((outcome) => outcome.episodeResult);
-  const totalRequests = outcomes.reduce((sum, outcome) => sum + outcome.requestCount, 0);
+  const completedOutcomes = outcomes.filter(<T>(v: T | undefined): v is T => v !== undefined);
+  const episodes = completedOutcomes.map((outcome) => outcome.episodeResult);
+  const totalRequests = prescanRequests + completedOutcomes.reduce((sum, outcome) => sum + outcome.requestCount, 0);
   const foundCount = episodes.filter((episode) => episode.status === "found").length;
   const totalBestSizeBytes = episodes.reduce((sum, episode) => sum + (episode.best?.sizeBytes ?? 0), 0);
   const result = {
