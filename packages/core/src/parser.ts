@@ -95,8 +95,9 @@ export function parseTitle(title: string): ParsedTitle {
     rawTitle: title
   };
 
-  const batch = BATCH_RANGE_RE.exec(title);
-  if (batch) {
+  const batchGlobal = new RegExp(BATCH_RANGE_RE.source, "g");
+  let batch: RegExpExecArray | null;
+  while ((batch = batchGlobal.exec(title)) !== null) {
     const start = Number.parseInt(batch[1], 10);
     const end = Number.parseInt(batch[2], 10);
     if (end > start && !RESOLUTION_NUMS.has(start) && !RESOLUTION_NUMS.has(end) && !(start >= 1990 && end >= 1990)) {
