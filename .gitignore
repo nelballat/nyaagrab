@@ -20,3 +20,11 @@ apps/desktop/src-tauri/gen/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Tests
+**/*.test.ts
+**/*.test.tsx
+**/tests/
+
+# Temp
+tmp/
