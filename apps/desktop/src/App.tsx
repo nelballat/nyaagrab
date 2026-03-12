@@ -128,6 +128,13 @@ function cleanReleaseTitle(title: string): string {
   return base;
 }
 
+function cleanBatchTitle(title: string): string {
+  let base = cleanReleaseTitle(title);
+  base = base.replace(/\s*[-–~]?\s*\d{1,4}\s*[-–~]\s*\d{1,4}\s*$/, "").trim();
+  base = base.replace(/\s*[-–]\s*$/, "").trim();
+  return base || cleanReleaseTitle(title);
+}
+
 const MIN_LEFT_PANE_WIDTH = 360;
 const MAX_LEFT_PANE_WIDTH = 540;
 const MIN_RIGHT_PANE_WIDTH = 720;
@@ -208,7 +215,7 @@ function EpisodeTable({
               <Fragment key={`batch-${batch.best.magnet}`}>
                 <tr className="episode-row">
                   <td className="release-cell col-release">
-                    <div className="release-primary__title">{cleanReleaseTitle(batch.best.title)}</div>
+                    <div className="release-primary__title">{cleanBatchTitle(batch.best.title)}</div>
                   </td>
                   <td className="col-group">{batch.best.group || "-"}</td>
                   <td className="col-size">{batch.best.sizeLabel}</td>
@@ -362,7 +369,7 @@ export function App() {
         individuals.push(group[0]);
       }
     }
-    batches.sort((a, b) => (b.episodes.length - a.episodes.length));
+    batches.sort((a, b) => (a.batchStart ?? Infinity) - (b.batchStart ?? Infinity));
     individuals.sort((a, b) => a.episode - b.episode);
     return { batches, individuals };
   }, [foundEpisodes]);
