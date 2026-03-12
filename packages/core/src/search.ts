@@ -402,15 +402,15 @@ function matchCollections(
   seen: Set<string>
 ): TorrentRecord[] {
   const matches: TorrentRecord[] = [];
+  const queryLower = normalizeSearchText(queryTitle);
   for (const torrent of torrents) {
     const parsed = parseTitle(torrent.title);
-    if (
-      titleMatchesCollectionQuery(torrent.title, queryTitle) &&
-      !parsed.isMovie &&
-      !parsed.isSpecial &&
-      (parsed.isBatch || parsed.episode === null) &&
-      !seen.has(torrent.infoHash)
-    ) {
+    if (parsed.isMovie || parsed.isSpecial || seen.has(torrent.infoHash)) { continue; }
+    if (!parsed.isBatch && parsed.episode !== null) { continue; }
+    const titleOk = parsed.isBatch
+      ? queryLower.length > 0 && normalizeSearchText(torrent.title).includes(queryLower)
+      : titleMatchesCollectionQuery(torrent.title, queryTitle);
+    if (titleOk) {
       seen.add(torrent.infoHash);
       matches.push(torrent);
     }
