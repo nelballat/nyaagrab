@@ -72,19 +72,7 @@ const NYAA_CATEGORY_OPTIONS: Array<{ value: NyaaCategory; label: string }> = [
 type StoredFormState = {
   request: SearchRequest;
   groupInput: string;
-  manualAltTitlesInput: string;
 };
-
-function serializeManualAltTitles(values: string[]): string {
-  return values.join("\n");
-}
-
-function parseManualAltTitlesInput(value: string): string[] {
-  return value
-    .split(/[\n,]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
 
 function loadStoredFormState(): StoredFormState {
   try {
@@ -92,8 +80,7 @@ function loadStoredFormState(): StoredFormState {
     if (!saved) {
       return {
         request: defaultRequest,
-        groupInput: "",
-        manualAltTitlesInput: ""
+        groupInput: ""
       };
     }
 
@@ -104,14 +91,12 @@ function loadStoredFormState(): StoredFormState {
     });
     return {
       request,
-      groupInput: parsed.groupInput ?? "",
-      manualAltTitlesInput: parsed.manualAltTitlesInput ?? serializeManualAltTitles(request.manualAltTitles)
+      groupInput: parsed.groupInput ?? ""
     };
   } catch {
     return {
       request: defaultRequest,
-      groupInput: "",
-      manualAltTitlesInput: ""
+      groupInput: ""
     };
   }
 }
@@ -179,6 +164,9 @@ const MAX_LEFT_PANE_WIDTH = 540;
 const MIN_RIGHT_PANE_WIDTH = 720;
 const SPLIT_GUTTER_WIDTH = 8;
 const RESULTS_OUTER_PADDING = 20;
+// Keep the helper copy local to the controls so the main search surface stays quiet.
+const SMALLER_FILES_TOOLTIP = "Ranks smaller encodes higher when the releases are otherwise comparable.";
+const ALT_TITLES_TOOLTIP = "Uses alternate series names like Japanese or localized titles when searching.";
 
 function canUseResizableSplit(containerWidth: number): boolean {
   return containerWidth >= MIN_LEFT_PANE_WIDTH + MIN_RIGHT_PANE_WIDTH + SPLIT_GUTTER_WIDTH + RESULTS_OUTER_PADDING;
@@ -424,7 +412,6 @@ export function App() {
   const [storedFormState] = useState(() => loadStoredFormState());
   const [request, setRequest] = useState<SearchRequest>(storedFormState.request);
   const [groupInput, setGroupInput] = useState(storedFormState.groupInput);
-  const [manualAltTitlesInput, setManualAltTitlesInput] = useState(storedFormState.manualAltTitlesInput);
   const [result, setResult] = useState<SearchResult | null>(null);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
@@ -476,8 +463,6 @@ export function App() {
   }, [foundEpisodes]);
   const missingEpisodes = useMemo(() => visibleEpisodes.filter((episode) => episode.status === "missing"), [visibleEpisodes]);
   const failedEpisodes = useMemo(() => visibleEpisodes.filter((episode) => episode.status === "failed"), [visibleEpisodes]);
-  const hasMixedCoverage = groupedResults.batches.length > 0 && groupedResults.individuals.length > 0;
-  const largeSearchRequested = request.endEpisode - request.startEpisode + 1 > 300;
   const visibleEpisodeTotal = progressCounts?.total ?? visibleEpisodes.length;
   const visibleCoveragePercent = useMemo(() => {
     if (visibleEpisodeTotal === 0) {
@@ -594,11 +579,10 @@ export function App() {
   useEffect(() => {
     const payload: StoredFormState = {
       request,
-      groupInput,
-      manualAltTitlesInput
+      groupInput
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [groupInput, manualAltTitlesInput, request]);
+  }, [groupInput, request]);
 
   useEffect(() => () => {
     if (mascotOverrideTimerRef.current !== null) {
@@ -650,11 +634,10 @@ export function App() {
     setLiveEpisodes([]);
     setProgressCounts(null);
     try {
-      const manualAltTitles = parseManualAltTitlesInput(manualAltTitlesInput);
       const payload = SearchRequestSchema.parse({
         ...request,
         preferredGroups: groupInput.split(",").map((value) => value.trim()).filter(Boolean),
-        manualAltTitles
+        manualAltTitles: []
       });
       activeRequest = payload;
       const searchResult = await runSearch(payload, (update) => {
@@ -736,6 +719,15 @@ export function App() {
       setStatus(error instanceof Error ? error.message : "Could not copy magnet");
       triggerMascotOverride("error", 2400);
     }
+  };
+
+  const clearResults = () => {
+    // Resetting the result state is what returns the shell to the centered idle layout.
+    setResult(null);
+    setLiveEpisodes([]);
+    setProgressCounts(null);
+    setStatus("Ready");
+    setMascotOverride(null);
   };
 
   return (
@@ -849,39 +841,24 @@ export function App() {
                 <input value={groupInput} onChange={(event) => setGroupInput(event.target.value)} placeholder="SubsPlease" />
               </label>
             </div>
-            <div className="row row--secondary-fields">
-              <label className="field field--wide field--stacked">
-                Manual alternate titles
-                <textarea
-                  value={manualAltTitlesInput}
-                  onChange={(event) => setManualAltTitlesInput(event.target.value)}
-                  placeholder={"Case Closed\nMeitantei Conan"}
-                  rows={3}
-                />
-              </label>
-            </div>
             <div className="toggle-group" aria-label="Search options">
-              <label className="checkbox checkbox--card">
+              <label className="checkbox checkbox--card" title={SMALLER_FILES_TOOLTIP}>
                 <input
                   type="checkbox"
                   checked={request.preferSmall}
                   onChange={(event) => setRequest((current) => ({ ...current, preferSmall: event.target.checked }))}
                 />
-                Prefer smaller files
+                <span className="checkbox__label">Smaller files</span>
               </label>
-              <label className="checkbox checkbox--card">
+              <label className="checkbox checkbox--card" title={ALT_TITLES_TOOLTIP}>
                 <input
                   type="checkbox"
                   checked={!request.disableAutoResolve}
                   onChange={(event) => setRequest((current) => ({ ...current, disableAutoResolve: !event.target.checked }))}
                 />
-                <span>Use AniList alternate titles</span>
-                <small>Off by default for safer exact-title searches</small>
+                <span className="checkbox__label">Alternative titles</span>
               </label>
             </div>
-            {largeSearchRequested ? (
-              <p className="subtle">Large searches may take longer and can hit Nyaa throttling.</p>
-            ) : null}
             <div className="row">
               {busy ? (
                 <button type="button" className="btn--stop" onClick={stopSearch}>Stop</button>
@@ -890,6 +867,9 @@ export function App() {
               )}
               <button type="button" disabled={!result} onClick={exportAll}>Export magnets</button>
               <button type="button" disabled={!result} onClick={async () => copyMagnetText(bestMagnets(result).join("\n"))}>Copy magnets</button>
+              {!busy && hasResultsSurface ? (
+                <button type="button" onClick={clearResults}>Clear</button>
+              ) : null}
             </div>
           </form>
           {showStatus ? (
@@ -929,16 +909,6 @@ export function App() {
 
           <section className="panel">
             <h2>Found Episodes</h2>
-            {hasMixedCoverage ? (
-              <p className="subtle">Batches and singles were combined based on trusted coverage and ranking.</p>
-            ) : null}
-            {result?.diagnostics?.warnings.length ? (
-              <ul>
-                {result.diagnostics.warnings.map((warning) => (
-                  <li key={warning}>{warning}</li>
-                ))}
-              </ul>
-            ) : null}
             <EpisodeTable
               episodes={groupedResults.individuals}
               batchGroups={groupedResults.batches}
@@ -946,12 +916,6 @@ export function App() {
               onOpenMagnet={openSingleMagnet}
             />
           </section>
-
-          {result ? (
-            <section className="panel">
-              <SearchReasoningPanel result={result} />
-            </section>
-          ) : null}
 
           {missingEpisodes.length > 0 ? (
             <section className="panel">
@@ -968,6 +932,12 @@ export function App() {
                   <li key={episode.episode}>Episode {episode.episode}: {episode.failureReason ?? "Unknown error"}</li>
                 ))}
               </ul>
+            </section>
+          ) : null}
+
+          {result ? (
+            <section className="panel">
+              <SearchReasoningPanel result={result} />
             </section>
           ) : null}
         </div>

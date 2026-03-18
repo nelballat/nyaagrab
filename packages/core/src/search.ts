@@ -1088,8 +1088,7 @@ export async function searchEpisodes(input: SearchRequest, providers: ProviderCo
 
   const resolvedTitles = await resolvedTitlesPromise;
   const warnings = uniqueNonEmpty([
-    resolvedTitles.resolverError ? "resolver failed, using exact title only" : "",
-    totalEpisodes > 300 ? "large search may have partial failures" : ""
+    resolvedTitles.resolverError ? "resolver failed, using exact title only" : ""
   ]);
 
   const batchPrescan = request.resultShape !== "episodesOnly"
@@ -1146,6 +1145,7 @@ export async function searchEpisodes(input: SearchRequest, providers: ProviderCo
       enabled: !request.disableAutoResolve,
       ...(resolvedTitles.resolverError ? { error: resolvedTitles.resolverError } : {})
     },
+    // Keep diagnostics tied to the final chosen results so the reasoning panel reflects what the user actually got.
     batchAnalysis: buildBatchAnalysis(request, resolvedTitles.allTitles, discoveredCollections, episodes),
     requestStats: {
       ...requestStats,

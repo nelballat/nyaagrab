@@ -601,6 +601,12 @@ select option {
   text-transform: none;
   color: var(--cream);
   cursor: pointer;
+  line-height: 1.15;
+}
+
+.checkbox__label {
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 .toggle-group {
@@ -609,13 +615,14 @@ select option {
   gap: 12px;
 }
 
+/* These cards need to read like compact toggles on desktop while still wrapping cleanly on narrow widths. */
 .checkbox--card {
-  min-height: 54px;
-  padding: 0 16px;
+  min-height: 56px;
+  padding: 12px 14px;
   border: 1.5px solid var(--outline);
   border-radius: var(--radius-input);
   background: var(--bg-input);
-  align-content: center;
+  justify-content: flex-start;
 }
 
 .checkbox--card:hover {
