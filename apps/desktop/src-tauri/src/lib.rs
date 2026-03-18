@@ -1,4 +1,10 @@
-use std::{fs, process::Command, sync::OnceLock, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    process::Command,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 use tokio::time::sleep;
 
 use reqwest::{
@@ -9,9 +15,13 @@ use rfd::FileDialog;
 use serde::Serialize;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TextResponse {
     text: Option<String>,
     error: Option<String>,
+    error_kind: Option<String>,
+    cache_status: Option<String>,
+    throttled_count: u32,
 }
 
 #[derive(Serialize)]
@@ -27,6 +37,18 @@ struct SavedFileResponse {
 
 static NYAA_CLIENT: OnceLock<Client> = OnceLock::new();
 static ANILIST_CLIENT: OnceLock<Client> = OnceLock::new();
+static RSS_CACHE: OnceLock<Mutex<HashMap<String, CachedRssEntry>>> = OnceLock::new();
+
+struct CachedRssEntry {
+    text: String,
+    stored_at: Instant,
+}
+
+const RSS_CACHE_TTL: Duration = Duration::from_secs(600);
+
+fn rss_cache() -> &'static Mutex<HashMap<String, CachedRssEntry>> {
+    RSS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn build_nyaa_client() -> Result<Client, reqwest::Error> {
     let mut headers = HeaderMap::new();
@@ -66,15 +88,58 @@ async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> Text
             return TextResponse {
                 text: None,
                 error: Some(error),
+                error_kind: None,
+                cache_status: None,
+                throttled_count: 0,
             }
         }
     };
 
-    let mut last_error: Option<String> = None;
+    let cache_key = format!("{query}\u{1f}{category}\u{1f}{filter}");
+    let cached_text = {
+        let mut cache = match rss_cache().lock() {
+            Ok(cache) => cache,
+            Err(error) => {
+                return TextResponse {
+                    text: None,
+                    error: Some(format!("cache lock failed: {error}")),
+                    error_kind: None,
+                    cache_status: None,
+                    throttled_count: 0,
+                }
+            }
+        };
 
-    for attempt in 1..=3 {
-        if attempt > 1 {
-            sleep(Duration::from_millis(500)).await;
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.stored_at.elapsed() <= RSS_CACHE_TTL {
+                Some(entry.text.clone())
+            } else {
+                cache.remove(&cache_key);
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(text) = cached_text {
+        return TextResponse {
+            text: Some(text),
+            error: None,
+            error_kind: None,
+            cache_status: Some("hit".to_string()),
+            throttled_count: 0,
+        };
+    }
+
+    let mut last_error: Option<String> = None;
+    let mut last_error_kind: Option<String> = None;
+    let mut throttled_count = 0;
+    let retry_delays = [Duration::from_millis(0), Duration::from_millis(750), Duration::from_millis(1500), Duration::from_millis(3000)];
+
+    for (index, delay) in retry_delays.iter().enumerate() {
+        let attempt = index + 1;
+        if !delay.is_zero() {
+            sleep(*delay).await;
         }
 
         let response = client
@@ -97,10 +162,10 @@ async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> Text
                     Err(error) => {
                         let msg = format!("request failed on attempt {attempt}: {error:#}");
                         if status.as_u16() == 429 {
-                            return TextResponse {
-                                text: None,
-                                error: Some(msg),
-                            };
+                            throttled_count += 1;
+                            last_error = Some(msg);
+                            last_error_kind = Some("throttled".to_string());
+                            continue;
                         }
                         last_error = Some(msg);
                         continue;
@@ -108,13 +173,31 @@ async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> Text
                 };
 
                 return match response.text().await {
-                    Ok(text) => TextResponse {
-                        text: Some(text),
-                        error: None,
-                    },
+                    Ok(text) => {
+                        if let Ok(mut cache) = rss_cache().lock() {
+                            cache.insert(
+                                cache_key.clone(),
+                                CachedRssEntry {
+                                    text: text.clone(),
+                                    stored_at: Instant::now(),
+                                },
+                            );
+                        }
+
+                        TextResponse {
+                            text: Some(text),
+                            error: None,
+                            error_kind: None,
+                            cache_status: Some("miss".to_string()),
+                            throttled_count,
+                        }
+                    }
                     Err(error) => TextResponse {
                         text: None,
                         error: Some(format!("read failed on attempt {attempt}: {error:#}")),
+                        error_kind: None,
+                        cache_status: Some("miss".to_string()),
+                        throttled_count,
                     },
                 };
             }
@@ -127,6 +210,9 @@ async fn fetch_nyaa_rss(query: String, category: String, filter: String) -> Text
     TextResponse {
         text: None,
         error: last_error,
+        error_kind: last_error_kind,
+        cache_status: Some("miss".to_string()),
+        throttled_count,
     }
 }
 

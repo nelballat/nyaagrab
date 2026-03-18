@@ -25,7 +25,7 @@ const defaultRequest: SearchRequest = {
   preferredCodec: "Any",
   preferredGroups: [],
   manualAltTitles: [],
-  disableAutoResolve: false
+  disableAutoResolve: true
 };
 
 const STORAGE_KEY = "nyaagrab.desktop.searchForm";
@@ -72,25 +72,47 @@ const NYAA_CATEGORY_OPTIONS: Array<{ value: NyaaCategory; label: string }> = [
 type StoredFormState = {
   request: SearchRequest;
   groupInput: string;
+  manualAltTitlesInput: string;
 };
+
+function serializeManualAltTitles(values: string[]): string {
+  return values.join("\n");
+}
+
+function parseManualAltTitlesInput(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
 function loadStoredFormState(): StoredFormState {
   try {
     const saved = window.localStorage.getItem(STORAGE_KEY);
     if (!saved) {
-      return { request: defaultRequest, groupInput: "" };
+      return {
+        request: defaultRequest,
+        groupInput: "",
+        manualAltTitlesInput: ""
+      };
     }
 
     const parsed = JSON.parse(saved) as Partial<StoredFormState>;
+    const request = SearchRequestSchema.parse({
+      ...defaultRequest,
+      ...parsed.request
+    });
     return {
-      request: SearchRequestSchema.parse({
-        ...defaultRequest,
-        ...parsed.request
-      }),
-      groupInput: parsed.groupInput ?? ""
+      request,
+      groupInput: parsed.groupInput ?? "",
+      manualAltTitlesInput: parsed.manualAltTitlesInput ?? serializeManualAltTitles(request.manualAltTitles)
     };
   } catch {
-    return { request: defaultRequest, groupInput: "" };
+    return {
+      request: defaultRequest,
+      groupInput: "",
+      manualAltTitlesInput: ""
+    };
   }
 }
 
@@ -112,6 +134,23 @@ function bestMagnets(result: SearchResult | null): string[] {
     magnets.push(magnet);
   }
   return magnets;
+}
+
+function sumUniqueBestSizeBytes(episodes: EpisodeResult[]): number {
+  const seen = new Set<string>();
+  let total = 0;
+
+  for (const episode of episodes) {
+    const best = episode.best;
+    if (!best || seen.has(best.magnet)) {
+      continue;
+    }
+
+    seen.add(best.magnet);
+    total += best.sizeBytes;
+  }
+
+  return total;
 }
 
 function cleanReleaseTitle(title: string): string {
@@ -208,9 +247,8 @@ function EpisodeTable({
             if (!batch.best) { return null; }
             const eps = batch.episodes;
             const rangeLabel = batch.batchStart !== null && batch.batchEnd !== null
-              ? `batch ep ${batch.batchStart}–${batch.batchEnd}`
+              ? `batch ep ${batch.batchStart}–${batch.batchEnd} · covers ${eps.length} of your episodes`
               : "batch pack";
-            const coverLabel = `${rangeLabel} · covers ${eps.length} of your episodes`;
             return (
               <Fragment key={`batch-${batch.best.magnet}`}>
                 <tr className="episode-row">
@@ -229,7 +267,7 @@ function EpisodeTable({
                 </tr>
                 <tr className="episode-toggle-row episode-toggle-row--last">
                   <td colSpan={5} className="episode-toggle-row__cell">
-                    <span className="release-batch-cover">{coverLabel} ({eps.length} episodes)</span>
+                    <span className="release-batch-cover">{rangeLabel}</span>
                   </td>
                 </tr>
               </Fragment>
@@ -316,6 +354,68 @@ function EpisodeTable({
   );
 }
 
+function SearchReasoningPanel({ result }: { result: SearchResult }) {
+  const diagnostics = result.diagnostics;
+  if (!diagnostics) {
+    return null;
+  }
+
+  return (
+    <details className="reasoning-panel">
+      <summary>Advanced Search Reasoning</summary>
+      <div className="reasoning-panel__content">
+        <p>
+          Auto-resolve: {diagnostics.resolver.enabled ? "enabled" : "disabled"}
+          {diagnostics.resolver.error ? ` (${diagnostics.resolver.error})` : ""}
+        </p>
+        <p>
+          Titles used: {diagnostics.resolvedTitlesUsed.join(", ") || "Exact title only"}
+        </p>
+        <p>
+          Requests: {diagnostics.requestStats.totalRequests} total, {diagnostics.requestStats.cacheHits} cache hits, {diagnostics.requestStats.cacheMisses} cache misses, {diagnostics.requestStats.throttledResponses} throttled responses
+        </p>
+        <p>
+          Elapsed: {Math.round(diagnostics.requestStats.elapsedMs)} ms
+        </p>
+        {diagnostics.warnings.length > 0 ? (
+          <>
+            <h3>Warnings</h3>
+            <ul>
+              {diagnostics.warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+        <h3>Accepted batch packs</h3>
+        {diagnostics.batchAnalysis.accepted.length > 0 ? (
+          <ul>
+            {diagnostics.batchAnalysis.accepted.map((decision) => (
+              <li key={`accepted-${decision.infoHash}`}>
+                {decision.title} | {decision.seeders} seeders | {decision.batchStart !== null && decision.batchEnd !== null ? `${decision.batchStart}-${decision.batchEnd}` : "range-less"} | covers {decision.matchedEpisodes} requested episode{decision.matchedEpisodes === 1 ? "" : "s"} | {decision.reason}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="empty">No accepted batch packs.</p>
+        )}
+        <h3>Rejected batch packs</h3>
+        {diagnostics.batchAnalysis.rejected.length > 0 ? (
+          <ul>
+            {diagnostics.batchAnalysis.rejected.map((decision) => (
+              <li key={`rejected-${decision.infoHash}`}>
+                {decision.title} | {decision.seeders} seeders | {decision.batchStart !== null && decision.batchEnd !== null ? `${decision.batchStart}-${decision.batchEnd}` : "range-less"} | {decision.reason}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="empty">No rejected batch packs.</p>
+        )}
+      </div>
+    </details>
+  );
+}
+
 /* ── Main app ── */
 export function App() {
   const shellRef = useRef<HTMLElement | null>(null);
@@ -324,6 +424,7 @@ export function App() {
   const [storedFormState] = useState(() => loadStoredFormState());
   const [request, setRequest] = useState<SearchRequest>(storedFormState.request);
   const [groupInput, setGroupInput] = useState(storedFormState.groupInput);
+  const [manualAltTitlesInput, setManualAltTitlesInput] = useState(storedFormState.manualAltTitlesInput);
   const [result, setResult] = useState<SearchResult | null>(null);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
@@ -355,7 +456,8 @@ export function App() {
     }
     const batches: Array<{ best: EpisodeResult["best"]; alternatives: EpisodeResult["alternatives"]; episodes: number[]; batchStart: number | null; batchEnd: number | null }> = [];
     for (const [, group] of hashGroups) {
-      if (group.length >= 2) {
+      const parsed = group[0].best ? parseTitle(group[0].best.title) : { isBatch: false, batchStart: null, batchEnd: null };
+      if (group.length >= 2 || parsed.isBatch) {
         const eps = group.map((ep) => ep.episode).sort((a, b) => a - b);
         const allAlts = new Map<string, EpisodeResult["alternatives"][number]>();
         for (const ep of group) {
@@ -363,7 +465,6 @@ export function App() {
             if (!allAlts.has(alt.magnet)) { allAlts.set(alt.magnet, alt); }
           }
         }
-        const parsed = group[0].best ? parseTitle(group[0].best.title) : { batchStart: null, batchEnd: null };
         batches.push({ best: group[0].best, alternatives: [...allAlts.values()], episodes: eps, batchStart: parsed.batchStart, batchEnd: parsed.batchEnd });
       } else {
         individuals.push(group[0]);
@@ -375,6 +476,8 @@ export function App() {
   }, [foundEpisodes]);
   const missingEpisodes = useMemo(() => visibleEpisodes.filter((episode) => episode.status === "missing"), [visibleEpisodes]);
   const failedEpisodes = useMemo(() => visibleEpisodes.filter((episode) => episode.status === "failed"), [visibleEpisodes]);
+  const hasMixedCoverage = groupedResults.batches.length > 0 && groupedResults.individuals.length > 0;
+  const largeSearchRequested = request.endEpisode - request.startEpisode + 1 > 300;
   const visibleEpisodeTotal = progressCounts?.total ?? visibleEpisodes.length;
   const visibleCoveragePercent = useMemo(() => {
     if (visibleEpisodeTotal === 0) {
@@ -491,10 +594,11 @@ export function App() {
   useEffect(() => {
     const payload: StoredFormState = {
       request,
-      groupInput
+      groupInput,
+      manualAltTitlesInput
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [groupInput, request]);
+  }, [groupInput, manualAltTitlesInput, request]);
 
   useEffect(() => () => {
     if (mascotOverrideTimerRef.current !== null) {
@@ -537,6 +641,7 @@ export function App() {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     const controller = new AbortController();
+    let activeRequest: SearchRequest | null = null;
     searchControllerRef.current = controller;
     setBusy(true);
     setMascotOverride(null);
@@ -545,11 +650,13 @@ export function App() {
     setLiveEpisodes([]);
     setProgressCounts(null);
     try {
+      const manualAltTitles = parseManualAltTitlesInput(manualAltTitlesInput);
       const payload = SearchRequestSchema.parse({
         ...request,
         preferredGroups: groupInput.split(",").map((value) => value.trim()).filter(Boolean),
-        manualAltTitles: []
+        manualAltTitles
       });
+      activeRequest = payload;
       const searchResult = await runSearch(payload, (update) => {
         setLiveEpisodes((current) => (
           [...current.filter((episode) => episode.episode !== update.episodeResult.episode), update.episodeResult]
@@ -558,15 +665,15 @@ export function App() {
         setProgressCounts({ completed: update.completed, total: update.total });
       }, controller.signal);
       if (controller.signal.aborted) {
-        buildPartialResult();
+        buildPartialResult(payload);
       } else {
         setResult(searchResult);
         setLiveEpisodes(searchResult.episodes);
         setStatus(`Completed: ${searchResult.coveragePercent.toFixed(0)}% coverage`);
       }
     } catch (error) {
-      if (controller.signal.aborted) {
-        buildPartialResult();
+      if (controller.signal.aborted && activeRequest) {
+        buildPartialResult(activeRequest);
       } else {
         setStatus(error instanceof Error ? error.message : "Search failed");
         triggerMascotOverride("error", 2400);
@@ -577,14 +684,15 @@ export function App() {
     }
   };
 
-  const buildPartialResult = () => {
+  const buildPartialResult = (activeRequest: SearchRequest) => {
+    const requestedEpisodeTotal = activeRequest.endEpisode - activeRequest.startEpisode + 1;
     setLiveEpisodes((current) => {
       const foundCount = current.filter((ep) => ep.status === "found").length;
-      const totalBestSizeBytes = current.reduce((sum, ep) => sum + (ep.best?.sizeBytes ?? 0), 0);
+      const totalBestSizeBytes = sumUniqueBestSizeBytes(current);
       setResult({
-        anime: request.anime,
+        anime: activeRequest.anime,
         episodes: current,
-        coveragePercent: current.length === 0 ? 0 : (foundCount / current.length) * 100,
+        coveragePercent: requestedEpisodeTotal === 0 ? 0 : (foundCount / requestedEpisodeTotal) * 100,
         totalRequests: 0,
         elapsedMs: 0,
         totalBestSizeBytes
@@ -741,6 +849,17 @@ export function App() {
                 <input value={groupInput} onChange={(event) => setGroupInput(event.target.value)} placeholder="SubsPlease" />
               </label>
             </div>
+            <div className="row row--secondary-fields">
+              <label className="field field--wide field--stacked">
+                Manual alternate titles
+                <textarea
+                  value={manualAltTitlesInput}
+                  onChange={(event) => setManualAltTitlesInput(event.target.value)}
+                  placeholder={"Case Closed\nMeitantei Conan"}
+                  rows={3}
+                />
+              </label>
+            </div>
             <div className="toggle-group" aria-label="Search options">
               <label className="checkbox checkbox--card">
                 <input
@@ -756,9 +875,13 @@ export function App() {
                   checked={!request.disableAutoResolve}
                   onChange={(event) => setRequest((current) => ({ ...current, disableAutoResolve: !event.target.checked }))}
                 />
-                Use alternate titles
+                <span>Use AniList alternate titles</span>
+                <small>Off by default for safer exact-title searches</small>
               </label>
             </div>
+            {largeSearchRequested ? (
+              <p className="subtle">Large searches may take longer and can hit Nyaa throttling.</p>
+            ) : null}
             <div className="row">
               {busy ? (
                 <button type="button" className="btn--stop" onClick={stopSearch}>Stop</button>
@@ -806,6 +929,16 @@ export function App() {
 
           <section className="panel">
             <h2>Found Episodes</h2>
+            {hasMixedCoverage ? (
+              <p className="subtle">Batches and singles were combined based on trusted coverage and ranking.</p>
+            ) : null}
+            {result?.diagnostics?.warnings.length ? (
+              <ul>
+                {result.diagnostics.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : null}
             <EpisodeTable
               episodes={groupedResults.individuals}
               batchGroups={groupedResults.batches}
@@ -813,6 +946,12 @@ export function App() {
               onOpenMagnet={openSingleMagnet}
             />
           </section>
+
+          {result ? (
+            <section className="panel">
+              <SearchReasoningPanel result={result} />
+            </section>
+          ) : null}
 
           {missingEpisodes.length > 0 ? (
             <section className="panel">

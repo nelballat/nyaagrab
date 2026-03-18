@@ -6,21 +6,48 @@ import type { SearchProgressUpdate } from "@nyaagrab/core";
 import type { RssFetchRequest } from "@nyaagrab/core";
 
 type DesktopSearchProvider = {
-  fetchRss(request: RssFetchRequest): Promise<{ items: ReturnType<typeof parseRss>; error?: string }>;
+  fetchRss(request: RssFetchRequest): Promise<{
+    items: ReturnType<typeof parseRss>;
+    error?: string;
+    errorKind?: "throttled";
+    cacheStatus?: "hit" | "miss";
+    throttledCount?: number;
+  }>;
   resolveTitles(name: string): Promise<{ titles: string[]; error?: string }>;
 };
 
 function createProvider(): DesktopSearchProvider {
   return {
     async fetchRss(request: RssFetchRequest) {
-      const response = await invoke<{ text?: string; error?: string }>("fetch_nyaa_rss", request);
+      const response = await invoke<{
+        text?: string;
+        error?: string;
+        errorKind?: "throttled";
+        cacheStatus?: "hit" | "miss";
+        throttledCount?: number;
+      }>("fetch_nyaa_rss", request);
       if (response.error || !response.text) {
-        return { items: [], error: response.error ?? "empty response" };
+        return {
+          items: [],
+          error: response.error ?? "empty response",
+          errorKind: response.errorKind,
+          cacheStatus: response.cacheStatus,
+          throttledCount: response.throttledCount
+        };
       }
       try {
-        return { items: parseRss(response.text) };
+        return {
+          items: parseRss(response.text),
+          cacheStatus: response.cacheStatus,
+          throttledCount: response.throttledCount
+        };
       } catch (error) {
-        return { items: [], error: error instanceof Error ? error.message : "invalid rss response" };
+        return {
+          items: [],
+          error: error instanceof Error ? error.message : "invalid rss response",
+          cacheStatus: response.cacheStatus,
+          throttledCount: response.throttledCount
+        };
       }
     },
     async resolveTitles(name: string) {

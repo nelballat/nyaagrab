@@ -1,4 +1,10 @@
-import type { EpisodeResult, SearchRequest, SearchResult } from "@nyaagrab/contracts";
+import type {
+  BatchDecision,
+  EpisodeResult,
+  SearchDiagnostics,
+  SearchRequest,
+  SearchResult
+} from "@nyaagrab/contracts";
 import { SearchRequestSchema, SearchResultSchema } from "@nyaagrab/contracts";
 import { extractSeriesTitle, parseTitle } from "./parser";
 import { scoreRelease } from "./ranker";
@@ -58,6 +64,30 @@ type SearchOptions = {
   signal?: AbortSignal;
 };
 
+type RequestStats = {
+  totalRequests: number;
+  cacheHits: number;
+  cacheMisses: number;
+  throttledResponses: number;
+};
+
+type ResolvedSearchTitles = {
+  allTitles: string[];
+  altTitles: string[];
+  resolverError?: string;
+};
+
+type BatchCandidateRecord = {
+  torrent: TorrentRecord;
+};
+
+const EMPTY_REQUEST_STATS: RequestStats = {
+  totalRequests: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  throttledResponses: 0
+};
+
 function normalizeSearchText(value: string): string {
   return value
     .normalize("NFKC")
@@ -113,6 +143,37 @@ function uniqueNonEmpty(values: string[]): string[] {
   }
 
   return result;
+}
+
+function mergeRequestStats(current: RequestStats, next: RequestStats): RequestStats {
+  return {
+    totalRequests: current.totalRequests + next.totalRequests,
+    cacheHits: current.cacheHits + next.cacheHits,
+    cacheMisses: current.cacheMisses + next.cacheMisses,
+    throttledResponses: current.throttledResponses + next.throttledResponses
+  };
+}
+
+function summarizeResponseStats(
+  responses: Array<{ response: Awaited<ReturnType<ProviderContext["fetchRss"]>> }>
+): RequestStats {
+  return responses.reduce<RequestStats>((stats, entry) => ({
+    totalRequests: stats.totalRequests + 1,
+    cacheHits: stats.cacheHits + (entry.response.cacheStatus === "hit" ? 1 : 0),
+    cacheMisses: stats.cacheMisses + (entry.response.cacheStatus === "miss" ? 1 : 0),
+    throttledResponses: stats.throttledResponses + (entry.response.throttledCount ?? 0)
+  }), EMPTY_REQUEST_STATS);
+}
+
+function appendUniqueTorrents(target: TorrentRecord[], additions: TorrentRecord[]): void {
+  const seen = new Set(target.map((item) => item.infoHash));
+  for (const addition of additions) {
+    if (seen.has(addition.infoHash)) {
+      continue;
+    }
+    seen.add(addition.infoHash);
+    target.push(addition);
+  }
 }
 
 function buildTitleQueryVariants(title: string): string[] {
@@ -341,7 +402,12 @@ function titleMatchesCollectionQuery(title: string, queryTitle: string): boolean
 
     if (suffixTokens.every((token, index) => {
       if (/^\d+$/.test(token)) {
-        return index > 0 && COLLECTION_SUFFIX_TOKENS.has(suffixTokens[index - 1]);
+        const previous = suffixTokens[index - 1];
+        const next = suffixTokens[index + 1];
+        return Boolean(
+          (previous && (/^\d+$/.test(previous) || COLLECTION_SUFFIX_TOKENS.has(previous)))
+          || (next && (/^\d+$/.test(next) || COLLECTION_SUFFIX_TOKENS.has(next)))
+        );
       }
       return COLLECTION_SUFFIX_TOKENS.has(token);
     })) {
@@ -350,6 +416,186 @@ function titleMatchesCollectionQuery(title: string, queryTitle: string): boolean
   }
 
   return false;
+}
+
+function extractCollectionCandidates(torrents: TorrentRecord[]): TorrentRecord[] {
+  const seen = new Set<string>();
+  const candidates: TorrentRecord[] = [];
+
+  for (const torrent of torrents) {
+    const parsed = parseTitle(torrent.title);
+    if (parsed.isMovie || parsed.isSpecial || seen.has(torrent.infoHash)) {
+      continue;
+    }
+    if (!parsed.isBatch && parsed.episode !== null) {
+      continue;
+    }
+    seen.add(torrent.infoHash);
+    candidates.push(torrent);
+  }
+
+  return candidates;
+}
+
+function hasExplicitBatchRange(torrent: TorrentRecord): boolean {
+  const parsed = parseTitle(torrent.title);
+  return parsed.batchStart !== null && parsed.batchEnd !== null;
+}
+
+function overlapsRequestedEpisodes(torrent: TorrentRecord, request: SearchRequest): boolean {
+  const parsed = parseTitle(torrent.title);
+  if (parsed.batchStart === null || parsed.batchEnd === null) {
+    return false;
+  }
+
+  return parsed.batchEnd >= request.startEpisode && parsed.batchStart <= request.endEpisode;
+}
+
+function describeCollectionMismatch(title: string, queryTitle: string): string {
+  if (titleMatchesCollectionQuery(title, queryTitle)) {
+    return "matched";
+  }
+
+  const normalizedQuery = normalizeSearchText(queryTitle);
+  const queryTokens = splitTokens(normalizedQuery);
+
+  for (const variant of extractSeriesTitleVariantPairs(title)) {
+    const normalizedSeriesTitle = normalizeSearchText(variant.cleaned);
+    const seriesTokens = splitTokens(normalizedSeriesTitle);
+    const tokenOverlap = queryTokens.length > 0
+      && seriesTokens.length > 0
+      && (
+        containsTokenSequence(seriesTokens, queryTokens)
+        || containsTokenSequence(queryTokens, seriesTokens)
+        || normalizedSeriesTitle.includes(normalizedQuery)
+        || normalizedQuery.includes(normalizedSeriesTitle)
+      );
+
+    if (tokenOverlap && !qualifiersCompatible(queryTitle, variant.raw)) {
+      return "qualifier mismatch";
+    }
+
+    if (tokenOverlap) {
+      return "contains extras outside series scope";
+    }
+  }
+
+  return "title mismatch";
+}
+
+function describeCollectionCandidateReason(
+  torrent: TorrentRecord,
+  queryTitles: string[],
+  request: SearchRequest,
+  acceptedMagnets: Set<string>
+): string {
+  if (torrent.seeders === 0) {
+    return "zero seeders";
+  }
+
+  const titleReasons = queryTitles.map((queryTitle) => describeCollectionMismatch(torrent.title, queryTitle));
+  const matchedTitle = titleReasons.includes("matched");
+  if (!matchedTitle) {
+    if (titleReasons.includes("qualifier mismatch")) {
+      return "qualifier mismatch";
+    }
+    if (titleReasons.includes("contains extras outside series scope")) {
+      return "contains extras outside series scope";
+    }
+    return "title mismatch";
+  }
+
+  if (!hasExplicitBatchRange(torrent)) {
+    return request.resultShape === "batchesOnly"
+      ? "representative range-less batch in batches-only mode"
+      : "range-less packs only surface in batches-only mode";
+  }
+
+  if (!overlapsRequestedEpisodes(torrent, request)) {
+    return "range does not cover requested episodes";
+  }
+
+  if (acceptedMagnets.has(torrent.magnet)) {
+    return "matched range and outranked singles";
+  }
+
+  return "outscored by another accepted batch";
+}
+
+function buildBatchAnalysis(
+  request: SearchRequest,
+  queryTitles: string[],
+  discoveredCollections: TorrentRecord[],
+  episodes: EpisodeResult[]
+): SearchDiagnostics["batchAnalysis"] {
+  const chosenEpisodesByMagnet = new Map<string, number[]>();
+  for (const episode of episodes) {
+    const best = episode.best;
+    if (!best) {
+      continue;
+    }
+    const parsed = parseTitle(best.title);
+    if (!parsed.isBatch && parsed.batchStart === null && parsed.batchEnd === null && parsed.episode !== null) {
+      continue;
+    }
+    const current = chosenEpisodesByMagnet.get(best.magnet) ?? [];
+    current.push(episode.episode);
+    chosenEpisodesByMagnet.set(best.magnet, current);
+  }
+
+  const acceptedMagnets = new Set(chosenEpisodesByMagnet.keys());
+  const discoveredByMagnet = new Map<string, TorrentRecord>();
+  for (const torrent of discoveredCollections) {
+    if (!discoveredByMagnet.has(torrent.magnet)) {
+      discoveredByMagnet.set(torrent.magnet, torrent);
+    }
+  }
+  for (const episode of episodes) {
+    if (!episode.best) {
+      continue;
+    }
+    const magnet = episode.best.magnet;
+    if (discoveredByMagnet.has(magnet)) {
+      continue;
+    }
+    discoveredByMagnet.set(magnet, {
+      title: episode.best.title,
+      link: "",
+      infoHash: magnet,
+      seeders: episode.best.seeders,
+      leechers: 0,
+      downloads: 0,
+      sizeLabel: episode.best.sizeLabel,
+      sizeBytes: episode.best.sizeBytes,
+      category: request.category,
+      pubDate: "",
+      magnet
+    });
+  }
+
+  const accepted: BatchDecision[] = [];
+  const rejected: BatchDecision[] = [];
+  for (const torrent of [...discoveredByMagnet.values()].sort((left, right) => right.seeders - left.seeders || left.title.localeCompare(right.title))) {
+    const parsed = parseTitle(torrent.title);
+    const matchedEpisodes = chosenEpisodesByMagnet.get(torrent.magnet)?.length ?? 0;
+    const decision: BatchDecision = {
+      title: torrent.title,
+      infoHash: torrent.infoHash,
+      seeders: torrent.seeders,
+      batchStart: parsed.batchStart,
+      batchEnd: parsed.batchEnd,
+      matchedEpisodes,
+      reason: describeCollectionCandidateReason(torrent, queryTitles, request, acceptedMagnets)
+    };
+
+    if (matchedEpisodes > 0) {
+      accepted.push(decision);
+    } else {
+      rejected.push(decision);
+    }
+  }
+
+  return { accepted, rejected };
 }
 
 function needsAltSearch(
@@ -407,9 +653,7 @@ function matchCollections(
     const parsed = parseTitle(torrent.title);
     if (parsed.isMovie || parsed.isSpecial || seen.has(torrent.infoHash)) { continue; }
     if (!parsed.isBatch && parsed.episode !== null) { continue; }
-    const titleOk = parsed.isBatch
-      ? queryLower.length > 0 && normalizeSearchText(torrent.title).includes(queryLower)
-      : titleMatchesCollectionQuery(torrent.title, queryTitle);
+    const titleOk = queryLower.length > 0 && titleMatchesCollectionQuery(torrent.title, queryTitle);
     if (titleOk) {
       seen.add(torrent.infoHash);
       matches.push(torrent);
@@ -504,7 +748,8 @@ function createLimitedProviders(providers: ProviderContext): ProviderContext {
 
 type EpisodeSearchOutcome = {
   episodeResult: EpisodeResult;
-  requestCount: number;
+  requestStats: RequestStats;
+  discoveredCollections: TorrentRecord[];
 };
 
 async function discoverBatchPacks(
@@ -512,23 +757,28 @@ async function discoverBatchPacks(
   request: SearchRequest,
   providers: ProviderContext,
   signal?: AbortSignal
-): Promise<{ packs: TorrentRecord[]; requestCount: number }> {
+): Promise<{ packs: TorrentRecord[]; requestStats: RequestStats; discoveredCollections: TorrentRecord[] }> {
   const queries = uniqueNonEmpty(
     titles.flatMap((title) => BATCH_PRESCAN_KEYWORDS.map((kw) => `${title} ${kw}`))
   );
   const seen = new Set<string>();
   const packs: TorrentRecord[] = [];
-  let requestCount = 0;
+  const discoveredCollections: TorrentRecord[] = [];
   const responses = await fetchQueries(queries, request, providers);
-  requestCount += responses.length;
+  const requestStats = summarizeResponseStats(responses);
   for (const entry of responses) {
     if (signal?.aborted) { break; }
     if (!entry.response || entry.response.error) { continue; }
+    appendUniqueTorrents(discoveredCollections, extractCollectionCandidates(entry.response.items));
     for (const title of titles) {
       packs.push(...matchCollections(entry.response.items, title, seen));
     }
   }
-  return { packs: filterDeadCandidates(packs), requestCount };
+  return {
+    packs: filterDeadCandidates(packs),
+    requestStats,
+    discoveredCollections
+  };
 }
 
 function batchCoversEpisode(pack: TorrentRecord, episode: number): boolean {
@@ -537,6 +787,43 @@ function batchCoversEpisode(pack: TorrentRecord, episode: number): boolean {
     return episode >= parsed.batchStart && episode <= parsed.batchEnd;
   }
   return false;
+}
+
+function selectBatchCandidatesForEpisode(
+  packs: TorrentRecord[],
+  episode: number,
+  request: SearchRequest
+): TorrentRecord[] {
+  const matches = packs.filter((pack) => batchCoversEpisode(pack, episode));
+  if (request.resultShape === "batchesOnly" && episode === request.startEpisode) {
+    for (const pack of packs) {
+      const parsed = parseTitle(pack.title);
+      if ((parsed.batchStart !== null && parsed.batchEnd !== null) || !parsed.isBatch) {
+        continue;
+      }
+      if (!matches.some((match) => match.infoHash === pack.infoHash)) {
+        matches.push(pack);
+      }
+    }
+  }
+  return matches;
+}
+
+function sumUniqueBestSizeBytes(episodes: EpisodeResult[]): number {
+  const seen = new Set<string>();
+  let total = 0;
+
+  for (const episode of episodes) {
+    const best = episode.best;
+    if (!best || seen.has(best.magnet)) {
+      continue;
+    }
+
+    seen.add(best.magnet);
+    total += best.sizeBytes;
+  }
+
+  return total;
 }
 
 async function fetchQueries(
@@ -559,45 +846,70 @@ async function fetchQueries(
   return raw.filter(<T>(v: T | undefined): v is T => v !== undefined && (v as any).response !== undefined);
 }
 
+async function resolveSearchTitles(
+  request: SearchRequest,
+  providers: ProviderContext
+): Promise<ResolvedSearchTitles> {
+  const manualAltTitles = uniqueNonEmpty(request.manualAltTitles);
+  if (request.disableAutoResolve) {
+    return {
+      allTitles: uniqueNonEmpty([request.anime, ...manualAltTitles]),
+      altTitles: manualAltTitles
+    };
+  }
+
+  const response = await providers.resolveTitles(request.anime);
+  const resolvedTitles = normalizeResolvedTitles(request.anime, response);
+  const allTitles = uniqueNonEmpty([...resolvedTitles, ...manualAltTitles]);
+
+  return {
+    allTitles,
+    altTitles: uniqueNonEmpty([...resolvedTitles.slice(1), ...manualAltTitles]),
+    resolverError: response.error
+  };
+}
+
 async function searchEpisode(
   episode: number,
   request: SearchRequest,
-  altTitlesPromise: Promise<string[]>,
+  resolvedTitlesPromise: Promise<ResolvedSearchTitles>,
   providers: ProviderContext,
   signal?: AbortSignal,
   preMatchedBatches?: TorrentRecord[]
 ): Promise<EpisodeSearchOutcome> {
   const collectionMatches = preMatchedBatches ? [...preMatchedBatches] : [];
+  const discoveredCollections = preMatchedBatches ? [...preMatchedBatches] : [];
   const bestConfirmedSeeders = collectionMatches.reduce((max, t) => {
     const p = parseTitle(t.title);
     return (p.batchStart !== null && p.batchEnd !== null) ? Math.max(max, t.seeders) : max;
   }, 0);
   if (request.resultShape === "batchesOnly") {
-    return buildEpisodeSearchOutcome(episode, request, [], [], collectionMatches, 0);
+    return buildEpisodeSearchOutcome(episode, request, [], [], collectionMatches, EMPTY_REQUEST_STATS, discoveredCollections);
   }
   if (request.resultShape === "auto" && bestConfirmedSeeders >= BATCH_SKIP_SEEDER_THRESHOLD) {
-    return buildEpisodeSearchOutcome(episode, request, [], [], collectionMatches, 0);
+    return buildEpisodeSearchOutcome(episode, request, [], [], collectionMatches, EMPTY_REQUEST_STATS, discoveredCollections);
   }
 
   const seenInfoHashes = new Set<string>();
   const errors: string[] = [];
-  let requestCount = 0;
+  let requestStats = EMPTY_REQUEST_STATS;
 
   const primaryResponses = await fetchQueries(buildEpisodeQueries(request.anime, episode), request, providers);
-  requestCount += primaryResponses.length;
+  requestStats = mergeRequestStats(requestStats, summarizeResponseStats(primaryResponses));
   let primaryMatches: TorrentRecord[] = [];
   for (const { response } of primaryResponses) {
     if (response.error) {
       errors.push(response.error);
       continue;
     }
+    appendUniqueTorrents(discoveredCollections, extractCollectionCandidates(response.items));
     primaryMatches = primaryMatches.concat(matchEpisode(response.items, request.anime, episode, seenInfoHashes));
     collectionMatches.push(...matchCollections(response.items, request.anime, seenInfoHashes));
   }
 
   let matches = [...primaryMatches];
   if (!signal?.aborted && needsAltSearch(primaryMatches, request)) {
-    const altTitles = await altTitlesPromise;
+    const { altTitles } = await resolvedTitlesPromise;
     if (altTitles.length > 0) {
       const altResults = await mapWithConcurrency(
         altTitles,
@@ -612,12 +924,13 @@ async function searchEpisode(
       for (const entry of altResults) {
         if (!entry) { continue; }
         const { altTitle, responses } = entry;
-        requestCount += responses.length;
+        requestStats = mergeRequestStats(requestStats, summarizeResponseStats(responses));
         for (const { response } of responses) {
           if (response.error) {
             errors.push(response.error);
             continue;
           }
+          appendUniqueTorrents(discoveredCollections, extractCollectionCandidates(response.items));
           matches = matches.concat(matchEpisode(response.items, altTitle, episode, seenInfoHashes));
           if (canUseCollectionFallbackTitle(altTitle)) {
             collectionMatches.push(...matchCollections(response.items, altTitle, seenInfoHashes));
@@ -627,7 +940,15 @@ async function searchEpisode(
     }
   }
 
-  return buildEpisodeSearchOutcome(episode, request, errors, matches, collectionMatches, requestCount);
+  return buildEpisodeSearchOutcome(
+    episode,
+    request,
+    errors,
+    matches,
+    collectionMatches,
+    requestStats,
+    discoveredCollections
+  );
 }
 
 function buildEpisodeSearchOutcome(
@@ -636,10 +957,13 @@ function buildEpisodeSearchOutcome(
   errors: string[],
   matches: TorrentRecord[],
   collectionMatches: TorrentRecord[],
-  requestCount: number
+  requestStats: RequestStats,
+  discoveredCollections: TorrentRecord[]
 ): EpisodeSearchOutcome {
   const viableMatches = filterDeadCandidates(matches);
-  const viableCollections = filterDeadCandidates(collectionMatches);
+  const viableCollections = filterDeadCandidates(collectionMatches).filter((match) => (
+    request.resultShape === "batchesOnly" || hasExplicitBatchRange(match)
+  ));
   const rankSingles = () => viableMatches
     .map((match) => scoreRelease(
       match,
@@ -666,7 +990,8 @@ function buildEpisodeSearchOutcome(
   if (request.resultShape === "episodesOnly") {
     if (viableMatches.length === 0) {
       return {
-        requestCount,
+        requestStats,
+        discoveredCollections,
         episodeResult: {
           episode,
           best: null,
@@ -679,7 +1004,8 @@ function buildEpisodeSearchOutcome(
 
     const rankedSingles = rankSingles();
     return {
-      requestCount,
+      requestStats,
+      discoveredCollections,
       episodeResult: {
         episode,
         best: rankedSingles[0],
@@ -692,7 +1018,8 @@ function buildEpisodeSearchOutcome(
   if (request.resultShape === "batchesOnly") {
     if (viableCollections.length === 0) {
       return {
-        requestCount,
+        requestStats,
+        discoveredCollections,
         episodeResult: {
           episode,
           best: null,
@@ -705,7 +1032,8 @@ function buildEpisodeSearchOutcome(
 
     const rankedCollections = rankCollections();
     return {
-      requestCount,
+      requestStats,
+      discoveredCollections,
       episodeResult: {
         episode,
         best: rankedCollections[0],
@@ -720,7 +1048,8 @@ function buildEpisodeSearchOutcome(
 
   if (rankedSingles.length === 0 && rankedCollections.length === 0) {
     return {
-      requestCount,
+      requestStats,
+      discoveredCollections,
       episodeResult: {
         episode,
         best: null,
@@ -734,7 +1063,8 @@ function buildEpisodeSearchOutcome(
   const ranked = [...rankedSingles, ...rankedCollections].sort((a, b) => b.score - a.score);
 
   return {
-    requestCount,
+    requestStats,
+    discoveredCollections,
     episodeResult: {
       episode,
       best: ranked[0],
@@ -749,30 +1079,41 @@ export async function searchEpisodes(input: SearchRequest, providers: ProviderCo
   const limitedProviders = createLimitedProviders(providers);
   const startTime = performance.now();
   const totalEpisodes = request.endEpisode - request.startEpisode + 1;
-  const manualAltTitles = request.manualAltTitles.filter((value) => value.trim().length > 0);
-  const altTitlesPromise = (
-    request.disableAutoResolve
-      ? Promise.resolve([request.anime])
-      : limitedProviders.resolveTitles(request.anime).then((response) => normalizeResolvedTitles(request.anime, response))
-  ).then((resolvedTitles) => Array.from(new Set([...resolvedTitles.slice(1), ...manualAltTitles])));
+  const resolvedTitlesPromise = resolveSearchTitles(request, limitedProviders);
   const episodeNumbers = Array.from(
     { length: totalEpisodes },
     (_, index) => request.startEpisode + index
   );
   let completedCount = 0;
 
-  const allTitles = await altTitlesPromise.then((alts) => [request.anime, ...alts]);
+  const resolvedTitles = await resolvedTitlesPromise;
+  const warnings = uniqueNonEmpty([
+    resolvedTitles.resolverError ? "resolver failed, using exact title only" : "",
+    totalEpisodes > 300 ? "large search may have partial failures" : ""
+  ]);
+
   const batchPrescan = request.resultShape !== "episodesOnly"
-    ? await discoverBatchPacks(allTitles, request, limitedProviders, options.signal)
-    : { packs: [] as TorrentRecord[], requestCount: 0 };
-  let prescanRequests = batchPrescan.requestCount;
+    ? await discoverBatchPacks(resolvedTitles.allTitles, request, limitedProviders, options.signal)
+    : {
+        packs: [] as TorrentRecord[],
+        requestStats: EMPTY_REQUEST_STATS,
+        discoveredCollections: [] as TorrentRecord[]
+      };
+  let requestStats = batchPrescan.requestStats;
 
   const outcomes = await mapWithConcurrency(
     episodeNumbers,
     EPISODE_SEARCH_CONCURRENCY,
     async (episode) => {
-      const episodeBatches = batchPrescan.packs.filter((pack) => batchCoversEpisode(pack, episode));
-      const outcome = await searchEpisode(episode, request, altTitlesPromise, limitedProviders, options.signal, episodeBatches);
+      const episodeBatches = selectBatchCandidatesForEpisode(batchPrescan.packs, episode, request);
+      const outcome = await searchEpisode(
+        episode,
+        request,
+        resolvedTitlesPromise,
+        limitedProviders,
+        options.signal,
+        episodeBatches
+      );
       completedCount += 1;
       options.onEpisodeProcessed?.({
         episodeResult: outcome.episodeResult,
@@ -786,16 +1127,40 @@ export async function searchEpisodes(input: SearchRequest, providers: ProviderCo
 
   const completedOutcomes = outcomes.filter(<T>(v: T | undefined): v is T => v !== undefined);
   const episodes = completedOutcomes.map((outcome) => outcome.episodeResult);
-  const totalRequests = prescanRequests + completedOutcomes.reduce((sum, outcome) => sum + outcome.requestCount, 0);
+  const discoveredCollections = [...batchPrescan.discoveredCollections];
+  for (const outcome of completedOutcomes) {
+    requestStats = mergeRequestStats(requestStats, outcome.requestStats);
+    appendUniqueTorrents(discoveredCollections, outcome.discoveredCollections);
+  }
+  const totalRequests = requestStats.totalRequests;
   const foundCount = episodes.filter((episode) => episode.status === "found").length;
-  const totalBestSizeBytes = episodes.reduce((sum, episode) => sum + (episode.best?.sizeBytes ?? 0), 0);
+  const totalBestSizeBytes = sumUniqueBestSizeBytes(episodes);
+  const elapsedMs = performance.now() - startTime;
+  const finalWarnings = uniqueNonEmpty([
+    ...warnings,
+    requestStats.throttledResponses > 0 ? "search throttled by Nyaa" : ""
+  ]);
+  const diagnostics: SearchDiagnostics = {
+    resolvedTitlesUsed: resolvedTitles.allTitles,
+    resolver: {
+      enabled: !request.disableAutoResolve,
+      ...(resolvedTitles.resolverError ? { error: resolvedTitles.resolverError } : {})
+    },
+    batchAnalysis: buildBatchAnalysis(request, resolvedTitles.allTitles, discoveredCollections, episodes),
+    requestStats: {
+      ...requestStats,
+      elapsedMs
+    },
+    warnings: finalWarnings
+  };
   const result = {
     anime: request.anime,
     episodes,
     coveragePercent: episodes.length === 0 ? 0 : (foundCount / episodes.length) * 100,
     totalRequests,
-    elapsedMs: performance.now() - startTime,
-    totalBestSizeBytes
+    elapsedMs,
+    totalBestSizeBytes,
+    diagnostics
   };
 
   return SearchResultSchema.parse(result);

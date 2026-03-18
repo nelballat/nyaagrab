@@ -30,6 +30,9 @@ export type TorrentRecord = {
 export type RssFetchResponse = {
   items: TorrentRecord[];
   error?: string;
+  errorKind?: "throttled";
+  cacheStatus?: "hit" | "miss";
+  throttledCount?: number;
 };
 
 export type RssFetchRequest = {

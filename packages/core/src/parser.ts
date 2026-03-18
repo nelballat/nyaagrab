@@ -21,6 +21,7 @@ const FILE_EXTENSION_RE = /\.[a-z0-9]{2,4}$/i;
 const LEADING_TAGS_RE = /^(?:\[[^\]]+\]\s*)+/;
 const TRAILING_METADATA_RE = /\s*(?:\[[^\]]+\]|\([^)]+\))\s*$/;
 const SERIES_TITLE_PATTERNS = [
+  /^(.*?)(?:\s*[-–—]\s*\d{1,4}\s*[-–~]\s*\d{1,4}(?:\s|[(\[.]|$))/i,
   /^(.*?)(?:\s*[-–—]\s*\d{1,4}(?:v\d+)?(?:\s|[(\[.]|$))/i,
   /^(.*?)(?:\s+\b(?:EP|Episode)\s*\d{1,4}(?:v\d+)?(?:\s|[(\[.]|$))/i,
   /^(.*?)(?:\s+\bS\d+E\d{1,4}(?:v\d+)?(?:\s|[(\[.]|$))/i,

@@ -73,19 +73,52 @@ export const EpisodeResultSchema = z.object({
   failureReason: z.string().optional()
 });
 
+export const BatchDecisionSchema = z.object({
+  title: z.string(),
+  infoHash: z.string(),
+  seeders: z.number().int().nonnegative(),
+  batchStart: z.number().int().positive().nullable(),
+  batchEnd: z.number().int().positive().nullable(),
+  matchedEpisodes: z.number().int().nonnegative(),
+  reason: z.string()
+});
+
+export const SearchDiagnosticsSchema = z.object({
+  resolvedTitlesUsed: z.array(z.string()),
+  resolver: z.object({
+    enabled: z.boolean(),
+    error: z.string().optional()
+  }),
+  batchAnalysis: z.object({
+    accepted: z.array(BatchDecisionSchema),
+    rejected: z.array(BatchDecisionSchema)
+  }),
+  requestStats: z.object({
+    totalRequests: z.number().int().nonnegative(),
+    cacheHits: z.number().int().nonnegative(),
+    cacheMisses: z.number().int().nonnegative(),
+    throttledResponses: z.number().int().nonnegative(),
+    elapsedMs: z.number().nonnegative()
+  }),
+  warnings: z.array(z.string())
+});
+
 export const SearchResultSchema = z.object({
   anime: z.string(),
   episodes: z.array(EpisodeResultSchema),
   coveragePercent: z.number(),
   totalRequests: z.number().int().nonnegative(),
   elapsedMs: z.number().nonnegative(),
-  totalBestSizeBytes: z.number().int().nonnegative()
+  totalBestSizeBytes: z.number().int().nonnegative(),
+  diagnostics: SearchDiagnosticsSchema.optional()
 });
 
 export type SearchRequest = z.infer<typeof SearchRequestSchema>;
 export type ReleaseCandidate = z.infer<typeof ReleaseCandidateSchema>;
 export type EpisodeResult = z.infer<typeof EpisodeResultSchema>;
 export type SearchResult = z.infer<typeof SearchResultSchema>;
+export type SearchDiagnostics = z.infer<typeof SearchDiagnosticsSchema>;
+export type BatchDecision = z.infer<typeof BatchDecisionSchema>;
 export type NyaaCategory = z.infer<typeof NyaaCategorySchema>;
 export type NyaaFilter = z.infer<typeof NyaaFilterSchema>;
 export type ResultShape = z.infer<typeof ResultShapeSchema>;
